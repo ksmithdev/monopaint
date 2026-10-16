@@ -756,6 +756,36 @@ public final class PaintActivity extends Activity implements ControlHost {
         try { action.run(); pad.renderReferenceChange(); pad.present(); recovery(); }
         catch (IllegalStateException | IllegalArgumentException error) { message(error.getMessage()); }
     }
+    /**
+     * Shows a live reference preview without saving: the commit at the gesture's end
+     * records the undo step and saves, so a slider drag does not hit the disk per frame.
+     */
+    void referencePreview(Runnable action) {
+        if (busy()) return;
+        try { action.run(); pad.renderReferenceChange(); pad.present(); }
+        catch (IllegalStateException | IllegalArgumentException error) { message(error.getMessage()); }
+    }
+    /**
+     * Draw the real reference at the transform the slider reached while the finger is
+     * still down, inside the still-open undo step. The step closes, and the save happens,
+     * when the finger lifts, so this costs no disk writes.
+     *
+     * <p>The outline must go first: it holds a snapshot of the pixels behind it, and
+     * restoring that later would wipe the picture just drawn. So clear, render, then
+     * re-capture the outline against the fresh pixels.</p>
+     */
+    void referenceSettle(Runnable action) {
+        if (busy()) return;
+        try {
+            float[] pending = pad.markedOutline();
+            pad.clearReferenceOutline(false);
+            action.run();
+            pad.renderReferenceChange();
+            if (pending != null) pad.showReferenceOutline(pending);
+            pad.present();
+        }
+        catch (IllegalStateException | IllegalArgumentException error) { message(error.getMessage()); }
+    }
     /** Opens the Reference panel beside its toolbar button; tapping the open one closes it. */
     void showReference(ToolButton anchor) {
         closePagePanel();

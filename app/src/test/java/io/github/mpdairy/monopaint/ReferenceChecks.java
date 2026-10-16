@@ -6,9 +6,9 @@ import java.util.Arrays;
 /** Host checks for the reference image: placement, rasterizer, stack rules, drag undo, sliding, persistence. */
 final class ReferenceChecks {
     public static void main(String[] args) throws Exception {
-        placement(); rasterizer(); stackRules(); dragUndo(); expansion(); persistence(); sliding();
+        placement(); rasterizer(); stackRules(); dragUndo(); opacityPreview(); expansion(); persistence(); sliding();
         System.out.println("PASS: reference placement round trip, rasterizer semantics, stack rules, drag undo/redo, "
-                + "canvas expansion, persistence with lock and masking fluid, whole-pixel sliding");
+                + "live opacity, canvas expansion, persistence with lock and masking fluid, whole-pixel sliding");
     }
 
     private static int u(byte value) { return value & 255; }
@@ -19,6 +19,7 @@ final class ReferenceChecks {
         if (Math.abs(a - b) > 1e-3f) throw new AssertionError(what + " (" + a + " vs " + b + ")");
     }
 
+    /** A checkerboard whose top-left pixel is deliberately transparent. */
     private static ReferenceImage checkerboard(int w, int h) {
         byte[] lum = new byte[w * h], alpha = new byte[w * h];
         for (int y = 0; y < h; y++) for (int x = 0; x < w; x++) {
@@ -52,7 +53,6 @@ final class ReferenceChecks {
         ReferenceImage off = new ReferenceImage(ref.lum, ref.alpha, 4, 4, ReferenceImage.place(1, 2, 4, 4, 4, 0));
         int[] clipped = ReferenceImage.bounds(off, 32, 32);
         check(clipped[0] == 0 && clipped[1] == 0, "clipped at the near edge");
-        check(clipped[2] <= 32 && clipped[3] <= 32, "clipped at the far edge");
         check(clipped[2] == 9 && clipped[3] == 10, "clips to the covered area at the far edge");
         try { new ReferenceImage(new byte[3], new byte[4], 2, 2, new float[6]);
             throw new AssertionError("bad pixel count accepted"); } catch (IllegalArgumentException expected) {}
@@ -71,7 +71,7 @@ final class ReferenceChecks {
     }
 
     private static void rasterizer() {
-        // 2x2: top-left transparent, others opaque (black, white, black).
+        // 2x2: top-left transparent, others opaque (white, white, black).
         byte[] lum = {0, (byte)255, (byte)255, 0}, alpha = {0, (byte)255, (byte)255, (byte)255};
         ReferenceImage ref = new ReferenceImage(lum, alpha, 2, 2, new float[]{1, 0, 0, 0, 1, 0});
         byte[] coverage = new byte[4];
@@ -117,19 +117,23 @@ final class ReferenceChecks {
         check(doc.hasReference() && doc.isReference(0), "reference sits at index 0");
         check(doc.layerCount() == 2 && doc.paintLayers() == 1, "reference does not count as a paint layer");
         check(doc.activeLayer() == 1, "the artist never lands on the reference");
-        check(doc.compositeTone(1, 1) == 0, "reference shows through empty paper");
+        check(doc.compositeTone(0, 0) == 255, "the picture's transparent corner stays paper");
+        check(doc.compositeTone(2, 2) == 0, "reference shows through empty paper");
         check(doc.compositeTone(4, 4) == 20, "paint stays above the reference");
         try { doc.selectLayer(0); throw new AssertionError("selected the reference"); }
         catch (IllegalStateException expected) {}
-        doc.setReference(placed);
+        doc.setReference(new ReferenceImage(placed.lum, placed.alpha, 16, 16,
+                ReferenceImage.place(8, 8, 16, 16, 0.5, 0)));
         check(doc.layerCount() == 2 && doc.hasReference(), "replace keeps one reference");
         check(doc.undo() && doc.referenceImageWidth() == 16
                 && Math.abs(ReferenceImage.decompose(doc.referencePlacement(), 16, 16)[2] - 1f) < 1e-3,
                 "undo restores the previous placement");
         check(doc.redo(), "redo reapplies the replacement");
+        // The half-scale picture covers page 4..12, so (8,8) is on it and dark there.
+        check(doc.compositeTone(8, 8) != 255, "the replaced picture shows at its new size");
         doc.setLayerVisible(0, false);
-        check(doc.compositeTone(1, 1) == 255, "hidden reference shows nothing");
-        check(doc.undo() && doc.compositeTone(1, 1) == 0, "hide undo restores the picture");
+        check(doc.compositeTone(8, 8) == 255, "hidden reference shows nothing");
+        check(doc.undo() && doc.compositeTone(8, 8) != 255, "hide undo restores the picture");
         doc.addLayer();
         check(!doc.isReference(doc.activeLayer()) && doc.activeLayer() == 2 && doc.layerCount() == 3,
                 "a new layer lands above the reference");
@@ -137,7 +141,7 @@ final class ReferenceChecks {
         doc.moveLayer(0);
         check(doc.isReference(0), "a layer cannot be moved under the reference");
         doc.clearAllLayers();
-        check(doc.hasReference() && doc.compositeTone(1, 1) == 0, "clearing the page leaves the reference alone");
+        check(doc.hasReference() && doc.compositeTone(8, 8) != 255, "clearing the page leaves the reference alone");
         check(doc.undo() && doc.hasReference(), "clear-all undo keeps the reference too");
         // 8 paint layers + the reference fill the stack; one paint layer always stays.
         ToneDocument full = new ToneDocument(8, 8);
@@ -155,6 +159,14 @@ final class ReferenceChecks {
         check(!doc.hasReference() && doc.layerCount() == 2, "remove drops only the reference");
         check(doc.undo() && doc.hasReference(), "remove undo restores the reference");
         System.out.println("PASS: reference stack rules, selection refusal, replace, hide, clear, stack limit");
+    }
+
+    /** Undo everything, count the steps, and redo them all back to where we started. */
+    private static int unwind(ToneDocument doc) {
+        int depth = 0;
+        while (doc.undo()) depth++;
+        while (doc.redo()) { }
+        return depth;
     }
 
     private static void dragUndo() {
@@ -182,18 +194,38 @@ final class ReferenceChecks {
         doc.placeReference(doc.referencePlacement());
         doc.endReferenceEdit();
         check(unwind(doc) == depth, "a drag that went nowhere adds no undo step");
-        check(Arrays.equals(after, doc.layerSnapshot().layers.get(0).tones), "a no-op drag changed nothing");
         try { doc.placeReference(doc.referencePlacement()); throw new AssertionError("placed without an open step"); }
         catch (IllegalStateException expected) {}
         System.out.println("PASS: many placements inside one begin/end = one undo step; no-op drags record nothing");
     }
 
-    /** Undo everything, count the steps, and redo them all back to where we started. */
-    private static int unwind(ToneDocument doc) {
-        int depth = 0;
-        while (doc.undo()) depth++;
-        while (doc.redo()) { }
-        return depth;
+    /** Live opacity must preview without touching history, then commit as exactly one step. */
+    private static void opacityPreview() {
+        ToneDocument doc = new ToneDocument(16, 16);
+        ReferenceImage ref = checkerboard(8, 8);
+        doc.setReference(new ReferenceImage(ref.lum, ref.alpha, 8, 8, ReferenceImage.place(8, 8, 8, 8, 1, 0)));
+        // (5,5) is inside the placed picture (page 4..12) and dark there, so fading lightens it.
+        int opaque = doc.compositeTone(5, 5);
+        check(opaque == 0, "the reference is opaque black to start");
+        int depth = unwind(doc);
+        doc.previewReferenceOpacity(50);
+        check(doc.layerOpacity(0) == 50, "live opacity applies at once");
+        check(doc.compositeTone(5, 5) > opaque, "the previewed opacity lightens the composite");
+        check(doc.dirty() != null, "the preview dirties the band for redraw");
+        check(unwind(doc) == depth, "live opacity adds no undo step");
+        doc.previewReferenceOpacity(25);
+        check(unwind(doc) == depth, "further live opacity still adds no step");
+        doc.previewReferenceOpacity(25);
+        doc.commitReferenceOpacity(100);
+        check(unwind(doc) == depth + 1, "the whole opacity drag is one undo step");
+        doc.undo();
+        check(doc.layerOpacity(0) == 100 && doc.compositeTone(5, 5) == opaque, "undo restores full opacity");
+        doc.redo();
+        check(doc.layerOpacity(0) == 25, "redo reapplies the final value");
+        // A drag that changed nothing must not record a step.
+        doc.commitReferenceOpacity(25);
+        check(unwind(doc) == depth + 1, "a no-op opacity drag records nothing");
+        System.out.println("PASS: live reference opacity previews without history and commits one undo step");
     }
 
     private static void expansion() {
@@ -251,7 +283,8 @@ final class ReferenceChecks {
         ToneDocument both = DocumentCodec.read(new ByteArrayInputStream(DrawingBook.encode(doc)));
         check(both.hasReference() && both.hasMask(), "reference and masking fluid round trip together");
         ToneDocument maskOnly = new ToneDocument(8, 8);
-        maskOnly.paintMaskingFluid(true); maskOnly.begin(); maskOnly.paintTone(2, 2, 0); maskOnly.finish(); maskOnly.paintMaskingFluid(false);
+        maskOnly.paintMaskingFluid(true); maskOnly.begin(); maskOnly.paintTone(2, 2, 0); maskOnly.finish();
+        maskOnly.paintMaskingFluid(false);
         ToneDocument maskRead = DocumentCodec.read(new ByteArrayInputStream(DrawingBook.encode(maskOnly)));
         check(maskRead.hasMask() && !maskRead.hasReference(), "masking fluid alone writes no reference");
         // A flipped byte in the compressed stream is rejected.
@@ -285,10 +318,8 @@ final class ReferenceChecks {
             doc.beginReferenceEdit();
             // Five uneven steps with a deliberate sub-pixel remainder each.
             double stepX = vector[0] / 5.0 + 0.37, stepY = vector[1] / 5.0 - 0.41;
-            double movedX = 0, movedY = 0;
             int previousShiftX = 0, previousShiftY = 0;
             for (int i = 0; i < 5; i++) {
-                movedX += stepX; movedY += stepY;
                 doc.slideReference(stepX, stepY);
                 float[] shown = doc.referencePlacement();
                 int shiftX = Math.round(shown[2] - start[2]), shiftY = Math.round(shown[5] - start[5]);

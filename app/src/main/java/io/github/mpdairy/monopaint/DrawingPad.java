@@ -512,14 +512,21 @@ final class DrawingPad extends View {
     void showReferenceOutline(float[] transform) {
         outlineTransform = transform;
         drawReferenceOutline();
-    }
-    void clearReferenceOutline() {
-        outlineTransform = null;
-        eraseReferenceOutline();
+        // The outline queues its own tiles; nothing else presents them during a slider
+        // drag, so without this the box only appears when the gesture commits.
         flush(true);
     }
+    /** The transform the outline currently marks, or null when none is shown. */
+    float[] markedOutline() { return outlineTransform == null ? null : outlineTransform.clone(); }
+    void clearReferenceOutline() { clearReferenceOutline(true); }
+    /** @param flush present now; false when a re-render presents in this same frame. */
+    void clearReferenceOutline(boolean flush) {
+        outlineTransform = null;
+        eraseReferenceOutline();
+        if (flush) flush(true);
+    }
     /** Put the outline back after a re-render replaced the raster under it. */
-    private void redrawReferenceOutline() {
+    void redrawReferenceOutline() {
         if (outlineTransform == null) return;
         // The rendered pixels are fresh; drop the saved background instead of restoring it over them.
         outlineTiles.clear();

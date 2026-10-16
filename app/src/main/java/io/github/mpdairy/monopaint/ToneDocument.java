@@ -88,6 +88,32 @@ final class ToneDocument {
     boolean referenceLocked() { return hasReference() && referenceLayer().locked; }
     /** The lock is a wish about the panel, not artwork: never an undo step. */
     void setReferenceLocked(boolean value) { idle(); if(hasReference()) referenceLayer().locked=value; }
+    /**
+     * Live opacity while the panel's slider moves. No undo step and no resample: opacity
+     * only changes the pixels the reference already covers, so just its band is redrawn.
+     * {@link #commitReferenceOpacity} records the gesture as one step.
+     */
+    void previewReferenceOpacity(int value) {
+        idle();
+        if(value<0||value>100) throw new IllegalArgumentException("Invalid layer opacity");
+        Layer layer=referenceLayer();
+        if(layer.opacity==value) return;
+        layer.opacity=value;
+        revision++;
+        int[] box=referenceBounds();
+        markDirty(box[0],box[1],box[2],box[3]);
+    }
+    /** Record the previewed opacity as one undo step, coming from {@code from}. */
+    void commitReferenceOpacity(int from) {
+        idle();
+        Layer layer=referenceLayer();
+        int to=layer.opacity;
+        if(from==to) return;
+        layer.opacity=from;                      // rewind so the snapshot captures the old state
+        StackState old=new StackState(this);
+        layer.opacity=to;
+        stackEdit(old);
+    }
     /** Replace or insert the reference at the bottom of the stack as one undo step. */
     void setReference(ReferenceImage image) {
         idle();

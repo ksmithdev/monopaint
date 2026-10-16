@@ -144,11 +144,34 @@ final class ReferenceUiChecks {
         await(test, () -> Math.abs(ReferenceImage.decompose(doc.referencePlacement(),
                 doc.referenceImageWidth(), doc.referenceImageHeight())[2] - base*2) < base*0.02f,
                 "scale slider at the end gives 200% of the base");
+        // Opacity is live: it must be applied while the finger is still down, not only on release.
+        int[] where = new int[2]; opacity.getLocationOnScreen(where);
+        float oy = where[1] + opacity.getHeight()/2f;
+        long down = SystemClock.uptimeMillis();
+        inject(test, down, MotionEvent.ACTION_DOWN, where[0] + opacity.getWidth()*0.9f, oy);
+        test.waitForIdleSync();
+        inject(test, down, MotionEvent.ACTION_MOVE, where[0] + opacity.getWidth()*0.3f, oy);
+        test.waitForIdleSync(); SystemClock.sleep(80);
+        check(doc.layerOpacity(0) > 20 && doc.layerOpacity(0) < 90,
+                "opacity previews live mid-drag at " + doc.layerOpacity(0) + "%");
+        inject(test, down, MotionEvent.ACTION_UP, where[0] + opacity.getWidth()*0.3f, oy);
+        test.waitForIdleSync(); SystemClock.sleep(120);
+        int committed = doc.layerOpacity(0);
+        check(committed > 20 && committed < 90, "opacity stays where the drag left it");
         // Lock disables the controls. Locking rebuilds the panel, so re-fetch the sliders.
+        ToolButton lock = (ToolButton) description(popup.getContentView(), "Lock the reference image in place");
+        int[] lockBefore = capture(lock);
         tap(test, description(popup.getContentView(), "Lock the reference image in place"));
         await(test, () -> doc.referenceLocked(), "lock responds");
         test.waitForIdleSync(); SystemClock.sleep(150);
         popup = referencePopup(activity);
+        int[] lockAfter = capture((ToolButton) description(popup.getContentView(), "Unlock the reference image"));
+        int differs = 0;
+        for (int i = 0; i < lockBefore.length; i++)
+            if (lockBefore[i] != lockAfter[i]) differs++;
+        // A difference of a pixel or two is invisible on e-ink; the shackle must visibly move.
+        check(differs > lockBefore.length / 40,
+                "the lock icon visibly changes (" + differs + " of " + lockBefore.length + " pixels)");
         rotate = slider(popup, "Rotate the reference image");
         scale = slider(popup, "Scale the reference image");
         opacity = slider(popup, "Reference image opacity");
@@ -166,7 +189,18 @@ final class ReferenceUiChecks {
         tap(test, description(popup.getContentView(), "Show the reference image"));
         await(test, () -> doc.layerVisible(0), "eye shows the reference again");
         dismissReference(test, activity);
-        report.append("PASS: reference panel title, rotate/opacity/scale ranges, 200% endpoint, lock and eye\n");
+        report.append("PASS: reference panel title, rotate/opacity/scale ranges, 200% endpoint, live opacity, lock and eye\n");
+    }
+
+    /** The control's rendered pixels, so a change in its icon can be detected. */
+    private static int[] capture(View view) throws Exception {
+        android.graphics.Bitmap bitmap = android.graphics.Bitmap.createBitmap(
+                view.getWidth(), view.getHeight(), android.graphics.Bitmap.Config.ARGB_8888);
+        view.draw(new android.graphics.Canvas(bitmap));
+        int[] pixels = new int[bitmap.getWidth() * bitmap.getHeight()];
+        bitmap.getPixels(pixels, 0, bitmap.getWidth(), 0, 0, bitmap.getWidth(), bitmap.getHeight());
+        bitmap.recycle();
+        return pixels;
     }
 
     /** Drag a slider from its middle to its far end, through the real touch path. */
@@ -202,6 +236,33 @@ final class ReferenceUiChecks {
         test.waitForIdleSync(); SystemClock.sleep(120);
         main(test, () -> check(Arrays.equals(before, doc.layerSnapshot().layers.get(0).tones),
                 "mid-drag the reference layer's pixels are byte-identical: nothing was resampled"));
+        // The outline is the only live feedback, so it must actually be on the screen,
+        // not merely queued. The display differs from the plain composite where it drew.
+        main(test, () -> {
+            Bitmap plain = Bitmap.createBitmap(doc.width, doc.height, Bitmap.Config.ARGB_8888);
+            ViewportBitmap.compose(doc, plain, true);
+            Bitmap display = (Bitmap)get(pad, "display");
+            int changed = 0;
+            for (int y = 0; y < doc.height; y += 3) for (int x = 0; x < doc.width; x += 3)
+                if (plain.getPixel(x, y) != display.getPixel(x, y)) changed++;
+            plain.recycle();
+            check(changed > 20, "the outline is presented live mid-drag (" + changed + " sample points differ)");
+        });
+        // Hold still and the real picture is drawn under the outline without lifting.
+        SystemClock.sleep(700);
+        test.waitForIdleSync();
+        main(test, () -> {
+            Bitmap plain = Bitmap.createBitmap(doc.width, doc.height, Bitmap.Config.ARGB_8888);
+            ViewportBitmap.compose(doc, plain, true);
+            Bitmap display = (Bitmap)get(pad, "display");
+            int changed = 0;
+            for (int y = 0; y < doc.height; y += 5) for (int x = 0; x < doc.width; x += 5)
+                if (plain.getPixel(x, y) != display.getPixel(x, y)) changed++;
+            plain.recycle();
+            check(changed > 200,
+                    "holding still settles the real picture into the display (" + changed + " sample points differ)");
+            check(doc.referenceEditing(), "the settle stays inside the open drag step: still one undo to do");
+        });
         // Dismiss the popup partway: it must commit the transform and leave no outline.
         main(test, () -> popup.dismiss());
         test.waitForIdleSync(); SystemClock.sleep(200);
@@ -223,7 +284,8 @@ final class ReferenceUiChecks {
             doc.redo();
             call(pad,"renderAll");
         });
-        report.append("PASS: outline-only rotate preview, dismissal commits one step and leaves no outline\n");
+        report.append("PASS: outline live during the rotate drag, settles to the picture when held still, "
+                + "dismissal commits one step and leaves no outline\n");
     }
 
     private interface ToneSnapshot { void check(byte[] tones) throws Exception; }

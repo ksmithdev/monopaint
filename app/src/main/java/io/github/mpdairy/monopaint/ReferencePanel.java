@@ -19,6 +19,8 @@ final class ReferencePanel {
     private final PaintActivity app;
     private final ToolButton trigger;
     private final ToneDocument document;
+    /** The opacity before the current slider drag, so its commit is one undo step. */
+    private int opacityFrom = -1;
     final PopupWindow popup;
     /** The scale the picture had when the panel opened; the slider is relative to it. */
     private final float baseScale;
@@ -78,6 +80,7 @@ final class ReferencePanel {
             // step that blocks painting — and must not leave a box stranded on the canvas.
             float[] pending = candidate;
             candidate = null;
+            cancelSettle();
             // Restore the pixels under the outline before the final composite, so the
             // saved background never covers freshly rendered artwork.
             app.pad.clearReferenceOutline();
@@ -85,6 +88,7 @@ final class ReferencePanel {
                 if (pending != null) app.referenceChange(() -> { document.placeReference(pending); document.endReferenceEdit(); });
                 else app.referenceChange(document::endReferenceEdit);
             }
+            commitOpacityIfDragged();
             app.selectionFeedback.update(trigger, trigger.markerArea(), () -> trigger.marked = false);
         });
         app.referencePopup = popup;
@@ -172,7 +176,7 @@ final class ReferencePanel {
             @Override public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
                 angle = progress - 180;
                 captioned.run();
-                if (fromUser && !document.referenceLocked()) preview();
+                if (fromUser && !document.referenceLocked()) { preview(); scheduleSettle(seekBar); }
             }
             @Override public void onStopTrackingTouch(SeekBar seekBar) { commit(); }
         });
@@ -197,13 +201,16 @@ final class ReferencePanel {
             @Override public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
                 scale = baseScale * (progress + 1) / 100f;
                 captioned.run();
-                if (fromUser && !document.referenceLocked()) preview();
+                if (fromUser && !document.referenceLocked()) { preview(); scheduleSettle(seekBar); }
             }
             @Override public void onStopTrackingTouch(SeekBar seekBar) { commit(); }
         });
     }
 
-    /** Opacity needs no resample: it rides the layer's own persisted opacity. */
+    /**
+     * Opacity needs no resample: it rides the layer's own persisted opacity, and only
+     * the pixels the picture covers change, so it previews live as the slider moves.
+     */
     private void addOpacity(LinearLayout rows) {
         TextView caption = new TextView(app);
         SeekBar bar = new SeekBar(app);
@@ -213,15 +220,31 @@ final class ReferencePanel {
         bar.setEnabled(!document.referenceLocked());
         SettingsForm.sliderRow(rows, caption, bar, app.prefs.largeSettingsText());
         caption.setText("Opacity\n" + document.layerOpacity(0) + "%");
+        final int[] from = { document.layerOpacity(0) };
         bar.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
-            @Override public void onStartTrackingTouch(SeekBar seekBar) { }
+            @Override public void onStartTrackingTouch(SeekBar seekBar) {
+                from[0] = document.layerOpacity(0);
+                opacityFrom = from[0];
+            }
             @Override public void onProgressChanged(SeekBar seekBar, int value, boolean fromUser) {
                 caption.setText("Opacity\n" + value + "%");
+                if (fromUser && !document.referenceLocked() && !document.referenceEditing())
+                    app.referencePreview(() -> document.previewReferenceOpacity(value));
             }
             @Override public void onStopTrackingTouch(SeekBar seekBar) {
-                app.referenceChange(() -> document.setLayerOpacity(0, seekBar.getProgress()));
+                opacityFrom = -1;
+                if (from[0] == document.layerOpacity(0)) return;
+                app.referenceChange(() -> document.commitReferenceOpacity(from[0]));
             }
         });
+    }
+
+    /** A previewed opacity the finger never lifted from still needs its undo step. */
+    private void commitOpacityIfDragged() {
+        int from = opacityFrom;
+        opacityFrom = -1;
+        if (from < 0 || from == document.layerOpacity(0)) return;
+        app.referenceChange(() -> document.commitReferenceOpacity(from));
     }
 
     private void preview() {
@@ -234,6 +257,7 @@ final class ReferencePanel {
     private void commit() {
         float[] pending = candidate;
         candidate = null;
+        cancelSettle();
         // Restore the pixels under the outline before the final composite.
         app.pad.clearReferenceOutline();
         if (pending == null) {
@@ -245,5 +269,35 @@ final class ReferencePanel {
             document.placeReference(pending);
             document.endReferenceEdit();
         });
+    }
+
+    /**
+     * A resample costs ~350 ms, so the outline is the live feedback. Hold still for
+     * {@link #SETTLE_MS} and the real picture is drawn once under the outline, so a
+     * careful placement can be checked before letting go.
+     */
+    private static final int SETTLE_MS = 400;
+    private Runnable settle;
+    private android.view.View settleOn;
+    private float[] lastSettled;
+    private void scheduleSettle(android.widget.SeekBar bar) {
+        cancelSettle();
+        settle = this::settle;
+        settleOn = bar;
+        bar.postDelayed(settle, SETTLE_MS);
+    }
+    private void cancelSettle() {
+        if (settle == null) return;
+        settleOn.removeCallbacks(settle);
+        settle = null;
+        settleOn = null;
+    }
+    private void settle() {
+        settle = null;
+        float[] pending = candidate;
+        if (pending == null || !document.referenceEditing()) return;
+        if (lastSettled != null && java.util.Arrays.equals(lastSettled, pending)) return;
+        lastSettled = pending;
+        app.referenceSettle(() -> document.placeReference(pending));
     }
 }
