@@ -15,12 +15,17 @@ final class ViewportBitmap {
     }
     private static native void nativeRender(Bitmap source,Bitmap target,float[] inverse,int[] dots,
                                              int left,int top,int right,int bottom);
-    private static native void nativeCompose(Bitmap target,byte[][] tones,byte[][] alpha,int[] opacity,int[] dots);
+    private static native void nativeCompose(Bitmap target,byte[][] tones,byte[][] alpha,int[] opacity,int[] dots,
+                                             int left,int top,int right,int bottom);
     /** One logical composite when navigation starts; never derive shades from display dots. */
     static void compose(ToneDocument document,Bitmap target) {
         compose(document,target,false);
     }
     static void compose(ToneDocument document,Bitmap target,boolean dither) {
+        compose(document,target,dither,new Rect(0,0,document.width,document.height));
+    }
+    /** Composite only {@code area}; a reference drag dirties a band, not the page. */
+    static void compose(ToneDocument document,Bitmap target,boolean dither,Rect area) {
         ToneDocument.Snapshot snapshot=document.layerSnapshot();
         java.util.ArrayList<byte[]> tones=new java.util.ArrayList<>(),alpha=new java.util.ArrayList<>();
         int[] opacity=new int[snapshot.layers.size()];
@@ -28,7 +33,8 @@ final class ViewportBitmap {
             opacity[tones.size()]=layer.opacity;
             tones.add(layer.tones);alpha.add(layer.alpha);
         }
-        nativeCompose(target,tones.toArray(new byte[0][]),alpha.toArray(new byte[0][]),java.util.Arrays.copyOf(opacity,tones.size()),dither?DOTS:null);
+        nativeCompose(target,tones.toArray(new byte[0][]),alpha.toArray(new byte[0][]),java.util.Arrays.copyOf(opacity,tones.size()),dither?DOTS:null,
+                area.left,area.top,area.right,area.bottom);
     }
     /** The page as a screen of that size would show it: smoothly scaled tones, then its dots. */
     static Bitmap dithered(ToneDocument document,int width,int height) {

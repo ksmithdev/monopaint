@@ -2,15 +2,16 @@
 #include <android/bitmap.h>
 #include <stdint.h>
 
-#define MAX_LAYERS 8
+/* The whole layer list may include the reference image underneath the paint. */
+#define MAX_STACK 9
 static void fail(JNIEnv *env,const char *message) {
     jclass type=(*env)->FindClass(env,"java/lang/IllegalStateException");
     if(type)(*env)->ThrowNew(env,type,message);
 }
 
 typedef struct {
-    uint8_t *tones[MAX_LAYERS],*alpha[MAX_LAYERS];
-    int visible[MAX_LAYERS],count,active,shade,logical,width;
+    uint8_t *tones[MAX_STACK],*alpha[MAX_STACK];
+    int visible[MAX_STACK],count,active,shade,logical,width;
     uint8_t *pixels;
     uint32_t stride;
     jint *dots;
@@ -63,7 +64,7 @@ Java_io_github_mpdairy_monopaint_ShapePreview_nativeApply(JNIEnv *env,jclass cla
     AndroidBitmapInfo info;
     int count=(*env)->GetArrayLength(env,tones);
     if(AndroidBitmap_getInfo(env,display,&info)!=ANDROID_BITMAP_RESULT_SUCCESS
-            || info.format!=ANDROID_BITMAP_FORMAT_RGBA_8888 || count<1 || count>MAX_LAYERS
+            || info.format!=ANDROID_BITMAP_FORMAT_RGBA_8888 || count<1 || count>MAX_STACK
             || active<0 || active>=count || shade< -1 || shade>255
             || (*env)->GetArrayLength(env,alpha)!=count || (*env)->GetArrayLength(env,visible)!=count
             || (*env)->GetArrayLength(env,previous)!=(int)info.height*4
@@ -71,7 +72,7 @@ Java_io_github_mpdairy_monopaint_ShapePreview_nativeApply(JNIEnv *env,jclass cla
             || (*env)->GetArrayLength(env,dots)!=256*64 || (*env)->GetArrayLength(env,dirty)!=4) {
         fail(env,"Invalid shape preview");return;
     }
-    jbyteArray toneRefs[MAX_LAYERS]={0},alphaRefs[MAX_LAYERS]={0};
+    jbyteArray toneRefs[MAX_STACK]={0},alphaRefs[MAX_STACK]={0};
     Raster r={.count=count,.active=active,.shade=shade,.logical=logical,.width=(int)info.width,
               .stride=info.stride,.left=(int)info.width,.top=(int)info.height};
     (*env)->GetIntArrayRegion(env,visible,0,count,r.visible);

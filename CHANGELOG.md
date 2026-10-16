@@ -6,6 +6,15 @@ with each change; when cutting a release, turn that section into
 
 ## Unreleased
 
+- A new **Reference** button in the toolbar (under Layers) lays a picture from your
+  tablet **under every layer** for tracing or copying. Import it from the panel,
+  then drag it into place on the canvas with one finger. The panel turns it,
+  scales it from 1% to 200%, fades it, hides it, and removes it. While you
+  rotate or scale, a simple outline shows where the picture will land, and the
+  sharp picture is drawn once when you lift your finger. Lock it so a stray
+  finger can't nudge it. The reference saves with the page, shows in your
+  exports, and never gets paint on it — your pen only touches your own layers.
+
 - The **wet brush pen** has a **Hold ink between strokes** setting, on at
   first. Turn it off for the first wet brush pen: it lays only clear water and
   holds no ink, lifting the paint it touches and letting it thin out through

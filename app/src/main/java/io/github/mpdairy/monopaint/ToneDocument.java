@@ -11,6 +11,8 @@ import java.util.Map;
  * Display dithering is derived from these tones. Confined to its owner thread. */
 final class ToneDocument {
     static final int MAX_LAYERS = 8;
+    /** The whole layer list including the reference image underneath. */
+    static final int MAX_STACK = MAX_LAYERS + 1;
     static final int MAX_PIXELS = 1920 * 2560;
     private static final int TILE = 64;
     private static final int HISTORY_BYTES = 32 * 1024 * 1024;
@@ -44,11 +46,18 @@ final class ToneDocument {
         int opacity=100;
         byte[] tones, alpha;
         boolean shared;
+        /** The reference layer: never paintable, never leaves index 0. */
+        boolean readOnly;
+        /** The reference's own padlock; its move/replace/remove APIs refuse while set. */
+        boolean locked;
+        /** The source picture + placement these pixels came from. */
+        ReferenceImage reference;
         Layer(String name, boolean visible, byte[] tones, byte[] alpha) {
             this.name=name; this.visible=visible; this.tones=tones; this.alpha=alpha;
         }
         // Saves own immutable array references. Only a subsequently edited layer is copied.
-        Layer copy() { shared=true; Layer copy=new Layer(name,visible,tones,alpha); copy.opacity=opacity; return copy; }
+        Layer copy() { shared=true; Layer copy=new Layer(name,visible,tones,alpha); copy.opacity=opacity;
+            copy.readOnly=readOnly; copy.locked=locked; copy.reference=reference; return copy; }
     }
     static final class Snapshot {
         final int width, height, active;
@@ -63,6 +72,184 @@ final class ToneDocument {
     }
     Snapshot layerSnapshot() { return new Snapshot(this); }
     int layerCount() { return layers.size(); }
+    /** How many layers the artist has: everything except the reference underneath. */
+    int paintLayers() {
+        int count=0;
+        for(Layer layer:layers) if(!layer.readOnly) count++;
+        return count;
+    }
+    boolean isReference(int index) { return layers.get(index).readOnly; }
+    boolean hasReference() { return !layers.isEmpty() && layers.get(0).readOnly; }
+    private Layer referenceLayer() { return layers.get(0); }
+    int[] referenceBounds() { return ReferenceImage.bounds(referenceLayer().reference, width, height); }
+    float[] referencePlacement() { return hasReference() ? referenceLayer().reference.transform.clone() : null; }
+    int referenceImageWidth() { return referenceLayer().reference.width; }
+    int referenceImageHeight() { return referenceLayer().reference.height; }
+    boolean referenceLocked() { return hasReference() && referenceLayer().locked; }
+    /** The lock is a wish about the panel, not artwork: never an undo step. */
+    void setReferenceLocked(boolean value) { idle(); if(hasReference()) referenceLayer().locked=value; }
+    /** Replace or insert the reference at the bottom of the stack as one undo step. */
+    void setReference(ReferenceImage image) {
+        idle();
+        if(image==null) throw new IllegalArgumentException("A reference needs a picture");
+        if(referenceLocked()) throw new IllegalStateException("Unlock the reference image first");
+        StackState old=new StackState(this);
+        if(hasReference()) {
+            Layer prior=referenceLayer();
+            Layer fresh=new Layer("Reference",prior.visible,paper(width,height),new byte[width*height]);
+            fresh.readOnly=true; fresh.locked=prior.locked; fresh.reference=image; fresh.opacity=prior.opacity;
+            ReferenceImage.rasterInto(image,fresh.tones,fresh.alpha,width,height,0,0,width,height);
+            layers.set(0,fresh);
+        } else {
+            Layer layer=new Layer("Reference",true,paper(width,height),new byte[width*height]);
+            layer.readOnly=true; layer.reference=image;
+            ReferenceImage.rasterInto(image,layer.tones,layer.alpha,width,height,0,0,width,height);
+            layers.add(0,layer);
+            selectLayer(active+1); // the artist never ends up "on" the reference
+        }
+        stackEdit(old);
+    }
+    void removeReference() {
+        idle();
+        if(!hasReference()) return;
+        if(referenceLocked()) throw new IllegalStateException("Unlock the reference image first");
+        StackState old=new StackState(this);
+        layers.remove(0);
+        selectLayer(Math.max(0,active-1));
+        stackEdit(old);
+    }
+    private float[] referenceEditFrom;
+    private float[] referencePending;
+    private StackState referenceEditOld;
+    boolean referenceEditing() { return editing && referenceEditFrom!=null; }
+    /** Opens one undoable step spanning many re-rasterizations of the reference. */
+    void beginReferenceEdit() {
+        idle();
+        if(!hasReference()) throw new IllegalStateException("There is no reference image");
+        if(referenceLocked()) throw new IllegalStateException("Unlock the reference image first");
+        referenceEditFrom=referenceLayer().reference.transform.clone();
+        referencePending=referenceEditFrom.clone();
+        referenceEditOld=new StackState(this);
+        editing=true;
+    }
+    /** Re-raster the picture at a new placement inside an open reference edit. */
+    void placeReference(float[] placement) {
+        if(!referenceEditing()) throw new IllegalStateException("Start a reference edit first");
+        if(referenceLocked()) throw new IllegalStateException("Unlock the reference image first");
+        referencePending=placement.clone();
+        Layer layer=writableReference();
+        ReferenceImage prior=layer.reference;
+        int[] before=ReferenceImage.bounds(prior,width,height);
+        ReferenceImage next=new ReferenceImage(prior.lum,prior.alpha,prior.width,prior.height,placement.clone());
+        int[] now=ReferenceImage.bounds(next,width,height);
+        int l=Math.min(before[0],now[0]),t=Math.min(before[1],now[1]),r=Math.max(before[2],now[2]),b=Math.max(before[3],now[3]);
+        for(int y=t;y<b;y++) {
+            java.util.Arrays.fill(layer.tones,y*width+l,y*width+r,(byte)255);
+            java.util.Arrays.fill(layer.alpha,y*width+l,y*width+r,(byte)0);
+        }
+        ReferenceImage.rasterInto(next,layer.tones,layer.alpha,width,height,now[0],now[1],now[2],now[3]);
+        layer.reference=next;
+        markDirty(l,t,r,b);
+    }
+    /**
+     * Move the already drawn pixels by whole pixels, no resample. Accumulate against the
+     * REQUESTED placement, never the drawn (rounded) one, or the fractional remainder of
+     * each step is lost and the picture lags the finger.
+     */
+    void slideReference(double dx,double dy) {
+        if(!referenceEditing()) throw new IllegalStateException("Start a reference edit first");
+        if(referenceLocked()) throw new IllegalStateException("Unlock the reference image first");
+        float[] next=ReferenceImage.translated(referencePending,dx,dy);
+        referencePending=next;
+        float[] shown=referenceLayer().reference.transform;
+        int sx=Math.round(next[2]-shown[2]),sy=Math.round(next[5]-shown[5]);
+        if(sx!=0||sy!=0) shiftReference(sx,sy);
+    }
+    /**
+     * Shift both planes of the reference layer by whole pixels, filling the vacated strip
+     * with paper. Rows walk toward the direction of travel so every row is read before it
+     * is overwritten; top-to-bottom while shifting down would copy already-cleared rows.
+     */
+    private void shiftReference(int dx,int dy) {
+        Layer layer=writableReference();
+        ReferenceImage prior=layer.reference;
+        int[] before=ReferenceImage.bounds(prior,width,height);
+        ReferenceImage next=new ReferenceImage(prior.lum,prior.alpha,prior.width,prior.height,
+                ReferenceImage.translated(prior.transform,dx,dy));
+        shiftPlane(layer.tones,width,height,dx,dy,(byte)255);
+        shiftPlane(layer.alpha,width,height,dx,dy,(byte)0);
+        layer.reference=next;
+        int[] now=ReferenceImage.bounds(next,width,height);
+        markDirty(Math.min(before[0],now[0]),Math.min(before[1],now[1]),
+                Math.max(before[2],now[2]),Math.max(before[3],now[3]));
+    }
+    private static void shiftPlane(byte[] plane,int w,int h,int dx,int dy,byte paper) {
+        int step=dy>=0?-1:1,start=dy>=0?h-1:0;
+        for(int y=start;y>=0&&y<h;y+=step) {
+            int sy=y-dy,row=y*w;
+            if(sy<0||sy>=h) { java.util.Arrays.fill(plane,row,row+w,paper); continue; }
+            int srow=sy*w;
+            if(dx>=0) {
+                java.util.Arrays.fill(plane,row,row+Math.min(dx,w),paper);
+                int len=w-dx;
+                if(len>0) System.arraycopy(plane,srow,plane,row+dx,len);
+            } else {
+                int len=w+dx;
+                if(len>0) System.arraycopy(plane,srow-dx,plane,row,len);
+                java.util.Arrays.fill(plane,row+len,row+w,paper);
+            }
+        }
+    }
+    /**
+     * Close the reference edit: re-raster the exact pending placement and record one undo
+     * step. A drag that went nowhere records nothing.
+     */
+    void endReferenceEdit() {
+        if(!referenceEditing()) throw new IllegalStateException("No reference edit is open");
+        float[] from=referenceEditFrom,pending=referencePending;
+        referenceEditFrom=null; referencePending=null;
+        StackState old=referenceEditOld; referenceEditOld=null;
+        editing=false;
+        if(java.util.Arrays.equals(from,pending)) return;
+        Layer layer=writableReference();
+        ReferenceImage prior=layer.reference;
+        int[] before=ReferenceImage.bounds(prior,width,height);
+        ReferenceImage next=new ReferenceImage(prior.lum,prior.alpha,prior.width,prior.height,pending);
+        int[] now=ReferenceImage.bounds(next,width,height);
+        // placeReference may already have drawn this exact transform; skip the second resample.
+        if(!java.util.Arrays.equals(prior.transform,pending)) {
+            int l=Math.min(before[0],now[0]),t=Math.min(before[1],now[1]),r=Math.max(before[2],now[2]),b=Math.max(before[3],now[3]);
+            for(int y=t;y<b;y++) {
+                java.util.Arrays.fill(layer.tones,y*width+l,y*width+r,(byte)255);
+                java.util.Arrays.fill(layer.alpha,y*width+l,y*width+r,(byte)0);
+            }
+            ReferenceImage.rasterInto(next,layer.tones,layer.alpha,width,height,now[0],now[1],now[2],now[3]);
+            layer.reference=next;
+            revision++;
+            markDirty(l,t,r,b);
+        }
+        addEdit(new Edit(old,new StackState(this)));
+    }
+    /** The reference layer, un-shared and ready to mutate in place. */
+    private Layer writableReference() {
+        revision++;
+        Layer layer=referenceLayer();
+        if(layer.shared) {
+            layer.tones=layer.tones.clone(); layer.alpha=layer.alpha.clone(); layer.shared=false;
+        }
+        return layer;
+    }
+    /** Re-raster the whole reference layer from its picture; never trust reused arrays. */
+    private void restoreReference(ReferenceImage image) {
+        if(!hasReference()||image==null) return;
+        Layer layer=referenceLayer();
+        if(layer.shared) {
+            layer.tones=layer.tones.clone(); layer.alpha=layer.alpha.clone(); layer.shared=false;
+        }
+        java.util.Arrays.fill(layer.tones,(byte)255); java.util.Arrays.fill(layer.alpha,(byte)0);
+        ReferenceImage.rasterInto(image,layer.tones,layer.alpha,width,height,0,0,width,height);
+        layer.reference=image;
+    }
     int activeLayer() { return active; }
     String layerName(int index) { return layers.get(index).name; }
     boolean layerVisible(int index) { return layers.get(index).visible; }
@@ -82,7 +269,8 @@ final class ToneDocument {
     private void bind(Layer layer) { bound=layer; tones=layer.tones; alpha=layer.alpha; }
     private void idle() { if(editing) throw new IllegalStateException("Finish the current gesture first"); }
     void selectLayer(int index) {
-        idle(); Layer layer=layers.get(index); if(active!=index)revision++;
+        idle(); if(isReference(index)) throw new IllegalStateException("The reference image cannot be drawn on.");
+        Layer layer=layers.get(index); if(active!=index)revision++;
         active=index; bind(layer);
     }
     /** Gestures from now on lay or, erasing, rub off masking fluid instead of painting the active layer. */
@@ -111,7 +299,7 @@ final class ToneDocument {
         return compositeTone(x,y)<128?255:0;
     }
     void addLayer() {
-        idle(); if(layers.size()>=MAX_LAYERS) throw new IllegalStateException("Each page can have up to "+MAX_LAYERS+" layers.");
+        idle(); if(paintLayers()>=MAX_LAYERS) throw new IllegalStateException("Each page can have up to "+MAX_LAYERS+" layers.");
         StackState old=new StackState(this);
         int number=1;
         while(hasName("Layer "+number)) number++;
@@ -120,11 +308,13 @@ final class ToneDocument {
     }
     private boolean hasName(String name) { for(Layer layer:layers) if(layer.name.equals(name)) return true; return false; }
     void removeLayer() {
-        idle(); if(layers.size()==1) throw new IllegalStateException("Keep at least one layer.");
+        idle(); if(paintLayers()==1) throw new IllegalStateException("Keep at least one layer.");
         StackState old=new StackState(this); layers.remove(active); selectLayer(Math.min(active,layers.size()-1)); stackEdit(old);
     }
     void moveLayer(int target) {
-        idle(); if(target<0||target>=layers.size()||target==active) return;
+        idle();
+        if(hasReference()&&target==0) target=1; // the reference always stays underneath
+        if(target<0||target>=layers.size()||target==active) return;
         StackState old=new StackState(this); Layer layer=layers.remove(active); layers.add(target,layer); selectLayer(target); stackEdit(old);
     }
     void setLayerVisible(int index,boolean visible) {
@@ -153,6 +343,13 @@ final class ToneDocument {
         for(Layer layer:layers) expanded.add(expanded(layer,(int)w,(int)h,left,top));
         Layer fluid=mask==null?null:expanded(mask,(int)w,(int)h,left,top);
         width=(int)w; height=(int)h; layers.clear(); layers.addAll(expanded); mask=fluid;
+        // The reference's drawn pixels moved with the paper; its placement must say so too.
+        if(hasReference()) {
+            Layer layer=referenceLayer();
+            layer.reference=new ReferenceImage(layer.reference.lum,layer.reference.alpha,
+                    layer.reference.width,layer.reference.height,
+                    ReferenceImage.translated(layer.reference.transform,left,top));
+        }
         captured=new boolean[columns()*((height+TILE-1)/TILE)];
         selectLayer(active); stackEdit(old);
     }
@@ -163,9 +360,14 @@ final class ToneDocument {
             System.arraycopy(layer.tones,y*width,ink,(y+top)*w+left,width);
             System.arraycopy(layer.alpha,y*width,coverage,(y+top)*w+left,width);
         }
-        Layer next=new Layer(layer.name,layer.visible,ink,coverage); next.opacity=layer.opacity; return next;
+        Layer next=new Layer(layer.name,layer.visible,ink,coverage);
+        next.opacity=layer.opacity; next.readOnly=layer.readOnly; next.locked=layer.locked; next.reference=layer.reference;
+        return next;
     }
     private void markAllDirty() { left=0; top=0; right=width; bottom=height; }
+    private void markDirty(int l,int t,int r,int b) {
+        left=Math.min(left,l); top=Math.min(top,t); right=Math.max(right,r); bottom=Math.max(bottom,b);
+    }
     private void addEdit(Edit edit) {
         for(Edit discarded:redo) historyBytes-=discarded.bytes;
         redo.clear(); undo.addLast(edit); historyBytes+=edit.bytes; trimHistory(HISTORY_BYTES);
@@ -218,11 +420,18 @@ final class ToneDocument {
     /** @param mask the page's masking fluid, or null */
     ToneDocument(int width,int height,ArrayList<Layer> source,int active,Layer mask) {
         validateSize(width,height); this.width=width; this.height=height;
-        if(source.isEmpty()||source.size()>MAX_LAYERS) throw new IllegalArgumentException("Invalid layer count");
+        if(source.isEmpty()||source.size()>MAX_STACK) throw new IllegalArgumentException("Invalid layer count");
         ArrayList<Layer> all=new ArrayList<>(source); if(mask!=null) all.add(mask);
         for(Layer layer:all)
             if(layer.tones.length!=width*height||layer.alpha.length!=width*height) throw new IllegalArgumentException("Invalid layer pixels");
         layers.addAll(source); this.mask=mask;
+        // A page always keeps one paintable layer; never land on the reference.
+        if(isReference(active)) {
+            int first=0;
+            while(first<layers.size()&&isReference(first)) first++;
+            if(first==layers.size()) throw new IllegalArgumentException("A page needs a paintable layer");
+            active=first;
+        }
         selectLayer(active); captured=new boolean[columns()*((height+TILE-1)/TILE)]; clearDirty();
     }
     static void validateSize(int width, int height) {
@@ -547,11 +756,16 @@ final class ToneDocument {
     /** Clear the current page, including hidden layers, as one structural undo step. */
     boolean clearAllLayers() {
         idle(); boolean marked=hasMask();
-        for(Layer layer:layers)for(byte a:layer.alpha)if(a!=0) {marked=true;break;}
+        for(Layer layer:layers) {
+            if(layer.readOnly) continue; // clearing the page leaves the reference picture alone
+            for(byte a:layer.alpha)if(a!=0) {marked=true;break;}
+        }
         if(!marked)return false;
         StackState old=new StackState(this); mask=null;
         for(int i=0;i<layers.size();i++) {
-            Layer prior=layers.get(i),blank=new Layer(prior.name,prior.visible,paper(width,height),new byte[width*height]);
+            Layer prior=layers.get(i);
+            if(prior.readOnly) continue;
+            Layer blank=new Layer(prior.name,prior.visible,paper(width,height),new byte[width*height]);
             blank.opacity=prior.opacity; layers.set(i,blank);
         }
         selectLayer(active); stackEdit(old); return true;
@@ -620,12 +834,15 @@ final class ToneDocument {
     private static final class StackState {
         final ArrayList<Layer> layers;
         final Layer mask;
+        /** The reference picture and placement captured at snapshot time. */
+        final ReferenceImage reference;
         final String[] names;
         final boolean[] visible;
         final int[] opacity;
         final int active, width, height;
         StackState(ToneDocument doc) {
             layers=new ArrayList<>(doc.layers); mask=doc.mask; active=doc.active; width=doc.width; height=doc.height;
+            reference=doc.hasReference()?doc.referenceLayer().reference:null;
             names=new String[layers.size()]; visible=new boolean[layers.size()]; opacity=new int[layers.size()];
             for(int i=0;i<layers.size();i++) { names[i]=layers.get(i).name; visible[i]=layers.get(i).visible; opacity[i]=layers.get(i).opacity; }
         }
@@ -635,6 +852,9 @@ final class ToneDocument {
             doc.layers.clear(); doc.layers.addAll(layers); doc.mask=mask;
             for(int i=0;i<layers.size();i++) { layers.get(i).name=names[i]; layers.get(i).visible=visible[i]; layers.get(i).opacity=opacity[i]; }
             doc.selectLayer(active);
+            // Re-raster the whole reference layer from the original picture rather than
+            // trusting arrays a drag may have reused or shared.
+            doc.restoreReference(reference);
         }
     }
     private static final class Edit {

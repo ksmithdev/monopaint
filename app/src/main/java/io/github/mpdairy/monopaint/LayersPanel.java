@@ -29,18 +29,19 @@ final class LayersPanel {
         LinearLayout rows = new LinearLayout(app); rows.setOrientation(LinearLayout.VERTICAL);
         rows.setPadding(dp(8), dp(8), dp(8), dp(8));
         rows.setBackground(Ui.outline(dp(2), Color.BLACK, 0));
-        TextView title = new TextView(app); title.setText("Layers · " + document.layerCount() + " / " + ToneDocument.MAX_LAYERS);
+        TextView title = new TextView(app); title.setText("Layers · " + document.paintLayers() + " / " + ToneDocument.MAX_LAYERS);
         title.setTextColor(Color.BLACK); title.setTextSize(18); title.setPadding(dp(8), dp(4), 0, dp(4));
         title.setTypeface(null, Typeface.BOLD); rows.addView(title);
         TextView hint = SettingsForm.hintText(app, "Top layers cover the ones below. Tap a name to draw on it.");
         hint.setPadding(dp(8), 0, dp(8), dp(8)); rows.addView(hint);
         LinearLayout actions = new LinearLayout(app); rows.addView(actions);
-        action(actions, "Add layer", () -> { change(document::addLayer); reopen(); }, document.layerCount() < ToneDocument.MAX_LAYERS);
+        action(actions, "Add layer", () -> { change(document::addLayer); reopen(); }, document.paintLayers() < ToneDocument.MAX_LAYERS);
         action(actions, "Done", this::dismiss, true);
         ScrollView list = new ScrollView(app);
         LinearLayout items = new LinearLayout(app); items.setOrientation(LinearLayout.VERTICAL); list.addView(items);
         rows.addView(list, new LinearLayout.LayoutParams(-1, dp(document.layerCount()*56)));
-        for (int i = document.layerCount()-1; i >= 0; i--) items.addView(layerRow(i), new LinearLayout.LayoutParams(-1, dp(56)));
+        for (int i = document.layerCount()-1; i >= 0; i--)
+            items.addView(document.isReference(i) ? referenceRow(i) : layerRow(i), new LinearLayout.LayoutParams(-1, dp(56)));
         int active = document.activeLayer();
         TextView editing = new TextView(app); editing.setText("Editing: " + document.layerName(active));
         editing.setTextSize(14); editing.setTextColor(Color.BLACK); editing.setPadding(dp(8), dp(8), 0, 0); rows.addView(editing);
@@ -50,7 +51,7 @@ final class LayersPanel {
         action(order, "Move down", () -> { change(() -> document.moveLayer(document.activeLayer()-1)); reopen(); }, active > 0);
         LinearLayout manage = new LinearLayout(app); rows.addView(manage);
         action(manage, "Rename", this::rename, true);
-        action(manage, "Delete", this::delete, document.layerCount() > 1);
+        action(manage, "Delete", this::delete, document.paintLayers() > 1);
         SettingsForm.style(rows, app.prefs.largeSettingsText());
 
         ScrollView scroll = new ScrollView(app); scroll.addView(rows);
@@ -80,6 +81,27 @@ final class LayersPanel {
     /** Rebuilds the panel after a change to the layer list. */
     private void reopen() { dismiss(); new LayersPanel(app, trigger); }
 
+    /** The reference's row: a plain label and its eye. It lives in the Reference panel now. */
+    private LinearLayout referenceRow(int index) {
+        LinearLayout row = new LinearLayout(app); row.setGravity(Gravity.CENTER_VERTICAL);
+        TextView name = new TextView(app); name.setText(document.layerName(index));
+        name.setTextColor(Color.BLACK); name.setTextSize(15); name.setGravity(Gravity.CENTER);
+        row.addView(name, new LinearLayout.LayoutParams(0, dp(52), 1));
+        ToolButton visible = new ToolButton(app, app); visible.press.feedback = app.layerFeedback; visible.iconHalf = 16;
+        visible.setBackgroundColor(Color.WHITE); visible.setPadding(dp(10), dp(10), dp(10), dp(10));
+        Runnable describe = () -> {
+            boolean shown = document.layerVisible(index);
+            visible.iconOnly(shown ? R.drawable.ic_layer_visible : R.drawable.ic_layer_hidden);
+            visible.setContentDescription((shown ? "Hide " : "Show ") + document.layerName(index));
+        };
+        describe.run();
+        visible.setOnClickListener(view -> {
+            change(() -> document.setLayerVisible(index, !document.layerVisible(index)));
+            app.layerFeedback.update(visible, describe);
+        });
+        row.addView(visible, new LinearLayout.LayoutParams(dp(52), dp(52)));
+        return row;
+    }
     private LinearLayout layerRow(int index) {
         boolean selected = index == document.activeLayer();
         LinearLayout row = new LinearLayout(app); row.setGravity(Gravity.CENTER_VERTICAL);

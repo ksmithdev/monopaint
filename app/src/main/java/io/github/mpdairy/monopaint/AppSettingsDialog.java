@@ -123,6 +123,7 @@ final class AppSettingsDialog {
     private String entryName(String key) {
         switch (key) {
             case Toolbar.LAYERS: return "Layers";
+            case Toolbar.REFERENCE: return "Reference";
             case Toolbar.ZOOM: return "Zoom";
             case Toolbar.PALETTE: return "Palette";
             default: return app.library.builtin(ToolSettings.Tool.valueOf(key)).label();
@@ -131,6 +132,7 @@ final class AppSettingsDialog {
     private int entryIcon(String key) {
         switch (key) {
             case Toolbar.LAYERS: return R.drawable.ic_layers;
+            case Toolbar.REFERENCE: return R.drawable.ic_reference;
             case Toolbar.ZOOM: return R.drawable.ic_zoom;
             case Toolbar.PALETTE: return R.drawable.ic_palette;
             default:

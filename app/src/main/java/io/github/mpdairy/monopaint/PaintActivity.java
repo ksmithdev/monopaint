@@ -93,7 +93,7 @@ public final class PaintActivity extends Activity implements ControlHost {
     TextView pageNumber;
 
     // Panels. At most one popup is open at a time.
-    PopupWindow toolPicker, filePopup, layersPopup;
+    PopupWindow toolPicker, filePopup, layersPopup, referencePopup;
     PaletteEditor paletteEditor;
     AlertDialog pageOverview, pageConfirmation;
     QuarterTurnLayout pagePanel;
@@ -519,7 +519,7 @@ public final class PaintActivity extends Activity implements ControlHost {
     void applyToolboxSide() {
         edgeBars.reset();
         closePagePanel(); closePaletteEditor();
-        dismiss(filePopup); dismiss(layersPopup);
+        dismiss(filePopup); dismiss(layersPopup); dismiss(referencePopup);
         boolean right = prefs.toolboxRight();
         toolboxRight = right;
         if (pad != null) { pad.finishStroke(); pad.disconnectDisplay(); }
@@ -661,7 +661,7 @@ public final class PaintActivity extends Activity implements ControlHost {
     /** Closes every panel and popup and leaves the eyedropper. */
     void dismissPanels() {
         closePagePanel(); closePaletteEditor(); setPickingShade(false);
-        dismiss(filePopup); dismiss(layersPopup); dismiss(toolPicker);
+        dismiss(filePopup); dismiss(layersPopup); dismiss(toolPicker); dismiss(referencePopup);
     }
     /** Whether a panel or prompt covers the canvas, so direct presentation must pause. */
     boolean canvasCovered() {
@@ -711,7 +711,7 @@ public final class PaintActivity extends Activity implements ControlHost {
     /** A list of labeled rows below the hamburger; tapping one closes the list and runs its action. */
     private void menu(View anchor, String[] names, int[] icons, Runnable[] actions) {
         closePagePanel();
-        dismiss(filePopup); dismiss(layersPopup);
+        dismiss(filePopup); dismiss(layersPopup); dismiss(referencePopup);
         LinearLayout rows = new LinearLayout(this); rows.setOrientation(LinearLayout.VERTICAL);
         ScrollView scroll = new ScrollView(this); scroll.addView(rows);
         PopupWindow menu = Popups.create(scroll, appTurn());
@@ -748,6 +748,22 @@ public final class PaintActivity extends Activity implements ControlHost {
         pad.finishStroke(); pad.dryWet();
         try { action.run(); pad.renderDirty(); pad.present(); recovery(); }
         catch (IllegalStateException | IllegalArgumentException error) { message(error.getMessage()); }
+    }
+    /** Like {@link #layerChange}, but renders only the reference's changed band. */
+    void referenceChange(Runnable action) {
+        if (busy()) return;
+        pad.finishStroke(); pad.dryWet();
+        try { action.run(); pad.renderReferenceChange(); pad.present(); recovery(); }
+        catch (IllegalStateException | IllegalArgumentException error) { message(error.getMessage()); }
+    }
+    /** Opens the Reference panel beside its toolbar button; tapping the open one closes it. */
+    void showReference(ToolButton anchor) {
+        closePagePanel();
+        if (referencePopup != null) { referencePopup.dismiss(); return; }
+        if (busy()) return;
+        if (layersPopup != null) layersPopup.dismiss();
+        pad.finishStroke(); pad.dryWet();
+        new ReferencePanel(this, anchor);
     }
     interface HistoryStep { boolean apply(); }
     void history(HistoryStep step) {
@@ -1088,7 +1104,9 @@ public final class PaintActivity extends Activity implements ControlHost {
         if (book == savedBook) { savedBook.markSaved(snapshot.book); drawingName = path; recovery(); }
     }
     private static final int PICK_FOLDER = 1;
+    private static final int PICK_REFERENCE = 3;
     private Consumer<Uri> folderPicked;
+    private Runnable referencePicked;
     /** Opens Android's folder picker at Supernote's EXPORT folder; keeps access to the chosen folder. */
     void pickFolder(Consumer<Uri> picked) {
         folderPicked = picked;
@@ -1103,6 +1121,12 @@ public final class PaintActivity extends Activity implements ControlHost {
     @Override protected void onActivityResult(int request, int result, Intent data) {
         super.onActivityResult(request, result, data);
         if (request == SHARED_STORAGE) { loadDrawing(); return; }
+        if (request == PICK_REFERENCE) {
+            Runnable done = referencePicked; referencePicked = null;
+            if (done != null && result == RESULT_OK && data != null && data.getData() != null)
+                importReference(data.getData(), done);
+            return;
+        }
         if (request != PICK_FOLDER) return;
         Consumer<Uri> picked = folderPicked; folderPicked = null;
         if (picked == null || result != RESULT_OK || data == null || data.getData() == null) return;
@@ -1114,6 +1138,68 @@ public final class PaintActivity extends Activity implements ControlHost {
     private void exportPng() {
         pad.dryWet();
         PngExport.show(this, book.snapshot(), drawingName);
+    }
+    /** Opens the stock picture picker; the picture to trace is wherever the artist put it. */
+    void pickReference(Runnable done) {
+        if (busy()) return;
+        pad.finishStroke(); pad.dryWet();
+        referencePicked = done;
+        Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT)
+                .setType("image/*")
+                .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+        try { startActivityForResult(intent, PICK_REFERENCE); }
+        catch (android.content.ActivityNotFoundException error) {
+            referencePicked = null; message("No picture picker on this tablet");
+        }
+    }
+    /** Decode the picked picture to gray planes and lay it under every layer, centered and upright. */
+    private void importReference(Uri uri, Runnable done) {
+        android.graphics.Bitmap bitmap = null;
+        try {
+            android.graphics.BitmapFactory.Options bounds = new android.graphics.BitmapFactory.Options();
+            bounds.inJustDecodeBounds = true;
+            try (java.io.InputStream in = getContentResolver().openInputStream(uri)) {
+                android.graphics.BitmapFactory.decodeStream(in, null, bounds);
+            }
+            if (bounds.outWidth <= 0 || bounds.outHeight <= 0) { message("That file is not a picture"); return; }
+            long limit = DocumentCodec.MAX_REFERENCE_PIXELS;
+            int sample = 1;
+            // The *4 is the RGBA decode headroom; the decoded pixels must stay under the page's.
+            while ((long)(bounds.outWidth / (sample * 2)) * (bounds.outHeight / (sample * 2)) * 4 > limit * 4) sample *= 2;
+            android.graphics.BitmapFactory.Options options = new android.graphics.BitmapFactory.Options();
+            options.inSampleSize = sample;
+            try (java.io.InputStream in = getContentResolver().openInputStream(uri)) {
+                bitmap = android.graphics.BitmapFactory.decodeStream(in, null, options);
+            }
+            if (bitmap == null) { message("Could not read that picture"); return; }
+            int w = bitmap.getWidth(), h = bitmap.getHeight();
+            if ((long)w * h > limit) {
+                float shrink = (float)Math.sqrt((double)limit / ((long)w * h));
+                android.graphics.Bitmap scaled = android.graphics.Bitmap.createScaledBitmap(
+                        bitmap, Math.max(1, Math.round(w * shrink)), Math.max(1, Math.round(h * shrink)), true);
+                if (scaled != bitmap) bitmap.recycle();
+                bitmap = scaled; w = bitmap.getWidth(); h = bitmap.getHeight();
+            }
+            int[] pixels = new int[w * h];
+            bitmap.getPixels(pixels, 0, w, 0, 0, w, h);
+            byte[] lum = new byte[w * h], alpha = new byte[w * h];
+            for (int i = 0; i < pixels.length; i++) {
+                int p = pixels[i];
+                alpha[i] = (byte)(p >>> 24);
+                lum[i] = (byte)Math.round(0.299 * ((p >> 16) & 255)
+                        + 0.587 * ((p >> 8) & 255) + 0.114 * (p & 255));
+            }
+            int pageW = pad.document.width, pageH = pad.document.height;
+            float scale = Math.min(1f, Math.min((float)pageW / w, (float)pageH / h)); // never upscale past the page
+            ReferenceImage image = new ReferenceImage(lum, alpha, w, h,
+                    ReferenceImage.place(pageW / 2f, pageH / 2f, w, h, scale, 0));
+            layerChange(() -> pad.document.setReference(image));
+            done.run();
+        } catch (java.io.IOException | IllegalArgumentException | OutOfMemoryError error) {
+            message("Could not import that picture");
+        } finally {
+            if (bitmap != null) bitmap.recycle();
+        }
     }
     private void openDrawing() {
         showSaveError();

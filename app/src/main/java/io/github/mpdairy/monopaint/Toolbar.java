@@ -26,7 +26,7 @@ final class Toolbar {
             ToolSettings.Tool.AIRBRUSH, ToolSettings.Tool.FILL, ToolSettings.Tool.SHAPES,
             ToolSettings.Tool.ERASER, ToolSettings.Tool.SOFTEN};
     /** Toolbar entries that are not tools. */
-    static final String LAYERS = "LAYERS", ZOOM = "ZOOM", PALETTE = "PALETTE";
+    static final String LAYERS = "LAYERS", REFERENCE = "REFERENCE", ZOOM = "ZOOM", PALETTE = "PALETTE";
 
     private final PaintActivity app;
     final ToolRail toolRail;
@@ -36,7 +36,7 @@ final class Toolbar {
     final PresetDragHandler presetDrag = new PresetDragHandler();
     /** Selectable buttons by key: {@code tool:<TOOL>} for built-ins, the preset ID for favorites. */
     final Map<String, ToolButton> selectionButtons = new LinkedHashMap<>();
-    ToolButton layersButton, zoomButton;
+    ToolButton layersButton, zoomButton, referenceButton;
     LinearLayout sidebarPalette;
     final ArrayList<PaletteSwatch> sidebarSwatches = new ArrayList<>();
     /** Progress text for long operations such as fills. */
@@ -84,13 +84,13 @@ final class Toolbar {
     boolean shapeChosen() {
         return app.prefs.shapeChosen(!library().builtin(ToolSettings.Tool.SHAPES).equals(ToolSettings.defaults(ToolSettings.Tool.SHAPES)));
     }
-    private boolean isTool(String key) { return !key.equals(LAYERS) && !key.equals(ZOOM) && !key.equals(PALETTE); }
+    private boolean isTool(String key) { return !key.equals(LAYERS) && !key.equals(REFERENCE) && !key.equals(ZOOM) && !key.equals(PALETTE); }
 
     /** All entries in the saved order, with any new entries appended. */
     ArrayList<String> toolbarOrder() {
         ArrayList<String> defaults = new ArrayList<>(), order = new ArrayList<>();
         for (ToolSettings.Tool tool : TOOLS) defaults.add(tool.name());
-        defaults.add(LAYERS); defaults.add(ZOOM); defaults.add(PALETTE);
+        defaults.add(LAYERS); defaults.add(REFERENCE); defaults.add(ZOOM); defaults.add(PALETTE);
         for (String key : app.prefs.toolbarOrder()) if (defaults.contains(key) && !order.contains(key)) order.add(key);
         // A newly offered entry joins beside the one it follows by default, not at the end.
         for (int i = 0; i < defaults.size(); i++) if (!order.contains(defaults.get(i)))
@@ -130,7 +130,7 @@ final class Toolbar {
                 library.select(ToolSettings.Tool.valueOf(key)); break;
             }
         }
-        layersButton = null; zoomButton = null;
+        layersButton = null; zoomButton = null; referenceButton = null;
         sidebarPalette = null; sidebarSwatches.clear();
         toolRail.removeAllViews(); selectionButtons.clear();
         for (String key : toolbarOrder()) {
@@ -138,6 +138,7 @@ final class Toolbar {
             if (key.equals(PALETTE)) addSidebarPalette();
             else if (key.equals(ZOOM)) addZoom();
             else if (key.equals(LAYERS)) addLayers();
+            else if (key.equals(REFERENCE)) addReference();
             else addTool(ToolSettings.Tool.valueOf(key));
         }
         boolean landscape = landscape();
@@ -161,6 +162,11 @@ final class Toolbar {
         layersButton = railButton("Layers", R.drawable.ic_layers, () -> app.showLayers(layersButton));
         layersButton.selectionOutline = true; layersButton.press.feedback = app.selectionFeedback;
         markActive(layersButton, false);
+    }
+    private void addReference() {
+        referenceButton = railButton("Reference", R.drawable.ic_reference, () -> app.showReference(referenceButton));
+        referenceButton.selectionOutline = true; referenceButton.press.feedback = app.selectionFeedback;
+        markActive(referenceButton, false);
     }
     private void addZoom() {
         zoomButton = railButton("Zoom", R.drawable.ic_zoom, app::toggleNavigationLock);

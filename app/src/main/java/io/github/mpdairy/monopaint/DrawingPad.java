@@ -124,6 +124,15 @@ final class DrawingPad extends View {
     /** Fingers are ignored until this time after the pen was last near the screen. */
     private long penGuardUntil;
 
+    // Dragging the reference image with one finger
+    private int referencePointer = -1;
+    private float referenceLastX, referenceLastY;
+    private boolean referenceDragStarted;
+    /** Presented pixels the rotate/scale outline is drawn over; empty when it is not shown. */
+    private final java.util.ArrayList<Rect> outlineTiles = new java.util.ArrayList<>();
+    private int[] outlineBackground = new int[0];
+    private float[] outlineTransform;
+
     DrawingPad(PaintActivity app) {
         super(app); this.app = app; landscapeTilt = app.device.landscapeTilt;
         setContentDescription("Painting canvas; use the pen to paint. Unlock Zoom to pinch and pan with two fingers.");
@@ -278,18 +287,27 @@ final class DrawingPad extends View {
         pending.clear();
         if (viewportBitmap != null) viewportBitmap.update(display, pageToView, null);
         redrawGradientGuide();
+        redrawReferenceOutline();
     }
     /** Draws the masking fluid's hatching over the freshly composed page. */
     private void drawMask() {
+        if (document.hasMask()) drawMask(new Rect(0, 0, document.width, document.height));
+    }
+    /** The mask hatch limited to {@code area}, so a reference band costs only its own pixels. */
+    private void drawMask(Rect area) {
         if (!document.hasMask()) return;
         int hatch = ToneDocument.HATCH;
-        // Visit only the pixels on the lines: each row's lines start where x + y is a multiple of the spacing.
-        for (int y = 0; y < document.height; y++)
-            for (int start = (hatch - y % hatch) % hatch - hatch; start < document.width; start += hatch)
-                for (int x = Math.max(0, start); x < Math.min(document.width, start + ToneDocument.HATCH_LINE); x++) {
+        int left = Math.max(0, area.left), right = Math.min(document.width, area.right);
+        for (int y = Math.max(0, area.top); y < Math.min(document.height, area.bottom); y++) {
+            // Each row's lines start where x + y is a multiple of the spacing.
+            int first = left - ((left + y) % hatch);
+            if (first > left) first -= hatch;
+            for (int start = first; start < right; start += hatch)
+                for (int x = Math.max(left, start); x < Math.min(right, start + ToneDocument.HATCH_LINE); x++) {
                     int line = document.maskHatch(x, y);
                     if (line >= 0) display.setPixel(x, y, line == 0 ? Color.BLACK : Color.WHITE);
                 }
+        }
     }
     /** Rebuild size-dependent display resources after canvas expansion or its undo. */
     void canvasResized() {
@@ -304,9 +322,11 @@ final class DrawingPad extends View {
         if (document == null || display == null) return;
         int[] bounds = document.dirty();
         if (bounds == null) return;
-        // The guide's saved background must not cover the newly rendered artwork.
+        // The guide's and the outline's saved backgrounds must not cover the newly rendered artwork.
         boolean guide = !guideTiles.isEmpty();
+        boolean outline = !outlineTiles.isEmpty();
         eraseGradientGuide();
+        eraseReferenceOutline();
         Rect dirty = new Rect(Math.max(0, bounds[0] - 2), Math.max(0, bounds[1] - 2),
                 Math.min(document.width, bounds[2] + 2), Math.min(document.height, bounds[3] + 2));
         if (dirty.intersect(0, 0, display.getWidth(), display.getHeight())) {
@@ -315,6 +335,7 @@ final class DrawingPad extends View {
         }
         document.clearDirty();
         if (guide) drawGradientGuide();
+        if (outline) drawReferenceOutline();
     }
     /** Queues page pixels that are already up to date in {@link #display}. */
     private void queue(Rect pageArea) {
@@ -402,6 +423,188 @@ final class DrawingPad extends View {
     }
     /** Removes the gradient guide from the screen. */
     private void clearGradientGuide() { eraseGradientGuide(); flush(true); }
+
+    /** Re-renders what the last reference change dirtied, limited to its band. */
+    void renderReferenceChange() {
+        renderReferenceBand(document.dirty());
+    }
+    /**
+     * Composite only the changed band. A reference drag dirties a band, not the page;
+     * compositing the whole page through the per-pixel path costs ~600 ms per finger move
+     * where the rect-limited native composite is ~50 ms on the Manta.
+     */
+    private void renderReferenceBand(int[] bounds) {
+        if (document == null || display == null || bounds == null) return;
+        // The gradient guide's saved background and the zoomed raster need the slow path.
+        if (!guideTiles.isEmpty() || viewportBitmap != null) { renderDirty(); return; }
+        Rect area = new Rect(Math.max(0, bounds[0] - 2), Math.max(0, bounds[1] - 2),
+                Math.min(document.width, bounds[2] + 2), Math.min(document.height, bounds[3] + 2));
+        if (area.isEmpty()) { document.clearDirty(); return; }
+        ViewportBitmap.compose(document, display, true, area);
+        drawMask(area);
+        document.clearDirty();
+        queue(area);
+    }
+
+    /**
+     * One finger drags the reference image around under the paint. Starts only when the
+     * touch lands on the picture and nothing else owns the gesture.
+     */
+    private boolean referenceDrag(MotionEvent event) {
+        if (referencePointer == -1) {
+            if (event.getActionMasked() != MotionEvent.ACTION_DOWN || event.getPointerCount() != 1) return false;
+            if (!Ui.fingersOnly(event) || !document.hasReference() || document.referenceLocked()) return false;
+            if (blocksFingerGesture()) return false;
+            pagePoint(event.getX(0), event.getY(0));
+            int[] box = document.referenceBounds();
+            if (samplePoint[0] < box[0] || samplePoint[0] >= box[2]
+                    || samplePoint[1] < box[1] || samplePoint[1] >= box[3]) return false;
+            referencePointer = event.getPointerId(0);
+            referenceLastX = samplePoint[0]; referenceLastY = samplePoint[1];
+            referenceDragStarted = false;
+            return true;
+        }
+        int action = event.getActionMasked();
+        int index = event.findPointerIndex(referencePointer);
+        if (action == MotionEvent.ACTION_CANCEL || index < 0 || event.getPointerCount() > 1) {
+            endReferenceDrag();
+            return true;
+        }
+        if (action == MotionEvent.ACTION_MOVE) {
+            pagePoint(event.getX(index), event.getY(index));
+            if (!referenceDragStarted
+                    && Math.hypot(samplePoint[0] - referenceLastX, samplePoint[1] - referenceLastY) < dp(10))
+                return true; // a resting hand does nothing
+            if (!referenceDragStarted) {
+                document.beginReferenceEdit();
+                referenceDragStarted = true;
+                getParent().requestDisallowInterceptTouchEvent(true);
+            }
+            // Map both ends of the step through the view→page matrix: dividing the raw
+            // delta by the scale is only correct on an upright page.
+            float dx = samplePoint[0] - referenceLastX, dy = samplePoint[1] - referenceLastY;
+            referenceLastX = samplePoint[0]; referenceLastY = samplePoint[1];
+            document.slideReference(dx, dy);
+            renderReferenceBand(document.dirty());
+            flush(false);
+        } else if (action == MotionEvent.ACTION_UP) {
+            endReferenceDrag();
+        }
+        return true;
+    }
+
+    private void endReferenceDrag() {
+        int pointer = referencePointer;
+        referencePointer = -1;
+        if (referenceDragStarted) {
+            referenceDragStarted = false;
+            document.endReferenceEdit();
+            // The release re-rasters the exact placement; draw that frame or the screen
+            // keeps showing the last whole-pixel slide step.
+            renderReferenceBand(document.dirty());
+            flush(true);
+            app.recovery();
+        }
+        if (pointer != -1) getParent().requestDisallowInterceptTouchEvent(false);
+    }
+
+    /** Draws a black outline of the reference at {@code transform}, over a white halo. */
+    void showReferenceOutline(float[] transform) {
+        outlineTransform = transform;
+        drawReferenceOutline();
+    }
+    void clearReferenceOutline() {
+        outlineTransform = null;
+        eraseReferenceOutline();
+        flush(true);
+    }
+    /** Put the outline back after a re-render replaced the raster under it. */
+    private void redrawReferenceOutline() {
+        if (outlineTransform == null) return;
+        // The rendered pixels are fresh; drop the saved background instead of restoring it over them.
+        outlineTiles.clear();
+        drawReferenceOutline();
+    }
+    private void drawReferenceOutline() {
+        if (outlineTransform != null && !outlineTiles.isEmpty()) eraseReferenceOutline();
+        if (outlineTransform == null) return;
+        Bitmap target = presented();
+        if (target == null) return;
+        float[] corners = outlineCorners();
+        // Tile along the four edges so a full-page reference damages only a band per frame.
+        int saved = 0;
+        RectF bounds = new RectF();
+        for (int edge = 0; edge < 4; edge++) {
+            float x0 = corners[edge * 2], y0 = corners[edge * 2 + 1];
+            float x1 = corners[((edge + 1) % 4) * 2], y1 = corners[((edge + 1) % 4) * 2 + 1];
+            int segments = Math.max(1, (int)Math.ceil(Math.hypot(x1 - x0, y1 - y0) / dp(48)));
+            for (int i = 0; i < segments; i++) {
+                float a = (float)i / segments, b = (float)(i + 1) / segments;
+                float ax = x0 + (x1 - x0) * a, ay = y0 + (y1 - y0) * a;
+                float bx = x0 + (x1 - x0) * b, by = y0 + (y1 - y0) * b;
+                bounds.set(Math.min(ax, bx), Math.min(ay, by), Math.max(ax, bx), Math.max(ay, by));
+                bounds.inset(-dp(6), -dp(6));
+                Rect tile = new Rect();
+                bounds.roundOut(tile);
+                if (tile.intersect(0, 0, target.getWidth(), target.getHeight())) {
+                    outlineTiles.add(tile);
+                    saved += tile.width() * tile.height();
+                }
+            }
+        }
+        if (outlineBackground.length < saved) outlineBackground = new int[saved];
+        // Save every tile before drawing; overlapping tiles restore in reverse.
+        int offset = 0;
+        for (Rect tile : outlineTiles) {
+            target.getPixels(outlineBackground, offset, tile.width(), tile.left, tile.top, tile.width(), tile.height());
+            offset += tile.width() * tile.height();
+        }
+        Canvas canvas = new Canvas(target);
+        Paint paint = new Paint();
+        paint.setStyle(Paint.Style.STROKE);
+        paint.setColor(Color.WHITE); paint.setStrokeWidth(dp(5));
+        drawOutlinePath(canvas, corners, paint);
+        paint.setColor(Color.BLACK); paint.setStrokeWidth(dp(2));
+        drawOutlinePath(canvas, corners, paint);
+        paint.setStyle(Paint.Style.FILL);
+        for (Rect tile : outlineTiles) queueView(tile);
+    }
+    /** The image's four corners mapped through the candidate transform, then to view space. */
+    private float[] outlineCorners() {
+        ReferenceImage ref = document.layerSnapshot().layers.get(0).reference;
+        float[] corners = {0, 0, ref.width, 0, ref.width, ref.height, 0, ref.height};
+        float[] m = outlineTransform;
+        for (int i = 0; i < 4; i++) {
+            float x = corners[i * 2], y = corners[i * 2 + 1];
+            corners[i * 2] = m[0] * x + m[1] * y + m[2];
+            corners[i * 2 + 1] = m[3] * x + m[4] * y + m[5];
+        }
+        if (viewportBitmap != null) pageToView.mapPoints(corners);
+        return corners;
+    }
+    private static void drawOutlinePath(Canvas canvas, float[] corners, Paint paint) {
+        android.graphics.Path path = new android.graphics.Path();
+        path.moveTo(corners[0], corners[1]);
+        path.lineTo(corners[2], corners[3]);
+        path.lineTo(corners[4], corners[5]);
+        path.lineTo(corners[6], corners[7]);
+        path.close();
+        canvas.drawPath(path, paint);
+    }
+    /** Restore the pixels under the outline and queue them. */
+    private void eraseReferenceOutline() {
+        if (outlineTiles.isEmpty()) return;
+        Bitmap target = presented();
+        int offset = 0;
+        for (Rect tile : outlineTiles) offset += tile.width() * tile.height();
+        for (int i = outlineTiles.size() - 1; i >= 0; i--) {
+            Rect tile = outlineTiles.get(i);
+            offset -= tile.width() * tile.height();
+            target.setPixels(outlineBackground, offset, tile.width(), tile.left, tile.top, tile.width(), tile.height());
+            queueView(tile);
+        }
+        outlineTiles.clear();
+    }
 
     // Direct e-ink presentation
 
@@ -539,6 +742,7 @@ final class DrawingPad extends View {
         if (app.paletteEditor != null || app.loading || document == null || fill != null || gradientCommit
                 || !app.resumed || !hasWindowFocus()) return true;
         if (historyTap(event)) return true;
+        if (referenceDrag(event)) return true;
         if (navigationGesture(event)) return true;
         if (app.pickingShade || pickPointer != -1) { sampleShadeGesture(event); return true; }
         if (hasGradient()) return true;
