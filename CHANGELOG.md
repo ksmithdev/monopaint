@@ -15,6 +15,8 @@ with each change; when cutting a release, turn that section into
   your finger. Fading is shown live as you drag. Lock it so a stray
   finger can't nudge it. The reference saves with the page, shows in your
   exports, and never gets paint on it — your pen only touches your own layers.
+  Drawings saved before this feature still open exactly as they were; adding a
+  reference to one never moves or alters the paint you already laid down.
 
 - The **wet brush pen** has a **Hold ink between strokes** setting, on at
   first. Turn it off for the first wet brush pen: it lays only clear water and
