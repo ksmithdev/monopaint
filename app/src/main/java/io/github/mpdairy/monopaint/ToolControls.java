@@ -25,6 +25,7 @@ final class ToolControls {
             case AIRBRUSH: airbrush(form, textSize); break;
             case BRUSH_PEN: case WET_BRUSH_PEN: brushPen(form, current, textSize); break;
             case FILL: fill(form, current); break;
+            case SELECT: selection(form); break;
             case SHAPES: shapes(form, current); break;
             default: throw new IllegalArgumentException("No controls for " + current.tool);
         }
@@ -110,6 +111,12 @@ final class ToolControls {
                 : "Drag along the gradient, then choose a second color.");
     }
 
+    private static void selection(SettingsForm form) {
+        form.percent("Tolerance", s -> s.tolerance, ToolSettings::tolerance);
+        form.hint("Fill: how different a tone may be and still be selected. 0% selects only the exact tone you tapped.");
+        form.hint("Move: drag anywhere to move the selection and what it holds. Tap outside it to let go.");
+    }
+
     private static void shapes(SettingsForm form, ToolSettings current) {
         boolean line = current.shape == ToolSettings.Shape.LINE;
         form.visibleWhen(form.radio(filled -> filled ? "Filled" : "Outline", filled -> filled ? "Filled shape" : "Outline shape",
@@ -132,7 +139,8 @@ final class ToolControls {
 
     /** The variant row above a tool's controls, or null for tools without variants. */
     static LinearLayout variants(Context context, ToolSettings current, boolean shapeChosen, Consumer<ToolSettings.Head> head,
-                                 Consumer<ToolSettings.Tool> pen, Consumer<ToolSettings.Gradient> fill, Consumer<ToolSettings.Shape> shape) {
+                                 Consumer<ToolSettings.Tool> pen, Consumer<ToolSettings.Gradient> fill, Consumer<ToolSettings.Shape> shape,
+                                 Consumer<ToolSettings.SelectMode> select) {
         LinearLayout row = new LinearLayout(context);
         if (current.tool.water) {
             row.setContentDescription("Brush pens");
@@ -153,6 +161,18 @@ final class ToolControls {
                 String label = type == ToolSettings.Gradient.FLAT ? "Flat fill" : type.label + " gradient";
                 Button button = SettingsForm.choice(context, label, ToolIcons.fill(type), current.gradient == type, () -> fill.accept(type));
                 button.setContentDescription(label); SettingsForm.addChoice(row, button, 112);
+            }
+        } else if (current.tool == ToolSettings.Tool.SELECT) {
+            row.setContentDescription("Selection modes");
+            // Move is a placement state rather than a picking mode; the panel's action row shows it.
+            for (ToolSettings.SelectMode mode : new ToolSettings.SelectMode[]{
+                    ToolSettings.SelectMode.FREEHAND, ToolSettings.SelectMode.FILL}) {
+                String label = mode == ToolSettings.SelectMode.FREEHAND ? "Freehand" : "Fill";
+                Button button = SettingsForm.choice(context, label, ToolIcons.select(mode), current.selectMode == mode, () -> select.accept(mode));
+                button.setContentDescription(label + ". " + (mode == ToolSettings.SelectMode.FREEHAND
+                        ? "Trace a loop around an area; what you enclose becomes the selection"
+                        : "Tap an area; the matching tones around your tap become the selection"));
+                SettingsForm.addChoice(row, button, 84);
             }
         } else if (current.tool == ToolSettings.Tool.SHAPES) {
             row.setContentDescription("Shape choices");

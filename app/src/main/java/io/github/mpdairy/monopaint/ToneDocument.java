@@ -36,6 +36,12 @@ final class ToneDocument {
     private Layer mask;
     /** Gestures paint the masking fluid instead of the active layer; see {@link #paintMaskingFluid}. */
     private boolean maskTarget;
+    /**
+     * The selected region of the page, or null. While it is set, every pixel change lands
+     * only on selected pixels, whatever tool or layer made it. The artist switches layers
+     * with the selection kept, so it belongs to the document rather than to a layer.
+     */
+    private Selection selection;
     /** The layer {@link #tones} and {@link #alpha} belong to: the active one, or the mask during a masking gesture. */
     private Layer bound;
     private long revision;
@@ -309,6 +315,202 @@ final class ToneDocument {
     }
     /** How strongly masking fluid shields this pixel, 0 to 255: the fluid's darkness. */
     private int shield(int i) { return mask==null?0:255-onWhite(mask.tones[i]&255,mask.alpha[i]&255); }
+    /** Whether this page pixel may be changed: inside the selection, or there is none. */
+    private boolean allowed(int x,int y) { return selection==null||selection.contains(x,y); }
+    /** The page's selection, or null. */
+    Selection selection() { return selection; }
+    void setSelection(Selection value) { selection=value; }
+    /** The selection's bounding box, or null when the page has no selection. */
+    int[] selectionBounds() { return selection==null?null:new int[]{selection.left,selection.top,selection.right,selection.bottom}; }
+    /** Copy the selected pixels of the active layer into a patch ready to paste. */
+    Clipboard copySelection() {
+        idle();
+        if (selection == null || selection.empty()) throw new IllegalStateException("Nothing is selected");
+        int[] box = selectionBounds();
+        int w = box[2]-box[0], h = box[3]-box[1];
+        byte[] tones = new byte[w*h], alpha = new byte[w*h];
+        for (int y = 0; y < h; y++) {
+            System.arraycopy(bound.tones, (box[1]+y)*width+box[0], tones, y*w, w);
+            System.arraycopy(bound.alpha, (box[1]+y)*width+box[0], alpha, y*w, w);
+        }
+        java.util.BitSet pixels = new java.util.BitSet(w*h);
+        java.util.BitSet region = new java.util.BitSet(w*h);
+        for (int y = 0; y < h; y++) for (int x = 0; x < w; x++) {
+            int i = (box[1]+y)*width + box[0]+x;
+            if (!selection.contains(box[0]+x, box[1]+y)) continue;
+            region.set(y*w+x);
+            // Only pixels that hold paint travel with the copy; untouched paper would
+            // lay white over whatever the copy lands on. A placed copy also only carries
+            // the pixels it owns, never artwork that was already under its area.
+            if (selection.owns(box[0]+x, box[1]+y) && (bound.alpha[i]&255) != 0) pixels.set(y*w+x);
+        }
+        if (pixels.isEmpty()) throw new IllegalStateException("Nothing is selected");
+        // The outline is the source selection's own: a lasso keeps the smooth line the
+        // artist traced. Rebuilding it from the travelling pixels instead draws a
+        // one-pixel staircase of thousands of tiny segments, which a dash effect turns
+        // into unreadable mush.
+        return new Clipboard(box[0], box[1], w, h, tones, alpha, pixels, region, selection.outline);
+    }
+    /**
+     * Paste {@code patch} onto the active layer at {@code dx},{@code dy} page pixels, as one
+     * undoable change. Only the patch's selected pixels are drawn, and only where the page's
+     * current selection allows, so a paste lands inside the selection like any other stroke.
+     */
+    void paste(Clipboard patch,int dx,int dy) { paste(patch,dx,dy,false); }
+    /**
+     * As {@link #paste}, and when {@code continues} is set the paste joins the undo step
+     * already on top of the stack rather than adding its own. A cut wipes its spot when it
+     * is made and pastes when it is dropped; that is one action, so one undo step should
+     * reverse both.
+     */
+    void paste(Clipboard patch,int dx,int dy,boolean continues) {
+        idle();
+        if(patch==null||patch.empty()) throw new IllegalStateException("There is nothing to paste");
+        begin();
+        try { pasteInto(patch,dx,dy); } finally { if (continues) finishContinuation(); else finish(); }
+    }
+    private void pasteInto(Clipboard patch,int dx,int dy) {
+        for(int row=0;row<patch.height;row++) for(int col=0;col<patch.width;col++) {
+            if(!patch.pixels.get(row*patch.width+col)) continue;
+            int x=patch.left+col+dx,y=patch.top+row+dy;
+            if(x<0||y<0||x>=width||y>=height) continue;
+            setPixel(x,y,patch.tones[row*patch.width+col]&255,patch.alpha[row*patch.width+col]&255);
+        }
+    }
+    /**
+     * Write {@code patch} down at {@code dx},{@code dy} and make the selection the copy's
+     * new home, remembering what lay under it first. This is dropping a copy: the copy
+     * overwrites the drawing beneath, so the record has to be taken before the paste or
+     * the next move of the copy can only uncover a hole.
+     */
+    void pastePlaced(Clipboard patch, int dx, int dy, boolean continues) {
+        idle();
+        if (patch == null || patch.empty()) throw new IllegalStateException("There is nothing to paste");
+        begin();
+        try {
+            // Move the selection over the landing spot first: the gate would otherwise
+            // block every pixel that lands outside where the selection was.
+            selection = patch.selectionMovedBy(dx, dy, width, height);
+            // Read what is down before writing over it: begin() has just bound the layer
+            // the copy lands on, so this is the first moment the covered artwork is right.
+            selection.backing = snapshotUnder(patch, dx, dy);
+            pasteInto(patch, dx, dy);
+        } finally { if (continues) finishContinuation(); else finish(); }
+    }
+    /** How many undo steps exist now. A cut records this so its drop can join its own wipe. */
+    int undoDepth() { return undo.size(); }
+
+    /**
+     * Take the selected pixels off the page as one undoable step, leaving the layer bare
+     * where they were. {@link #copySelection} took their copy first, so a cut is this wipe
+     * plus a copy riding the pen; undoing puts them back.
+     */
+    boolean wipeSelection() {
+        idle();
+        if (selection == null || selection.empty()) throw new IllegalStateException("Nothing is selected");
+        int[] box = selectionBounds();
+        java.util.BitSet inside = new java.util.BitSet(width * height);
+        for (int y = box[1]; y < box[3]; y++) for (int x = box[0]; x < box[2]; x++)
+            // Same rule as a copy: a placed copy wipes only its own pixels, so the bare
+            // spot it leaves never takes artwork that was merely underneath it.
+            if (selection.contains(x, y) && selection.owns(x, y)
+                    && (bound.alpha[y * width + x] & 255) != 0) inside.set(y * width + x);
+        if (inside.isEmpty()) return false;
+        Selection was = selection;
+        // A placed copy overwrote the artwork it was sitting on; that record is what the
+        // bare spot should show, so cutting a placed copy uncovers the drawing instead of
+        // leaving a hole shaped like its own pixels.
+        Clipboard under = was.backing;
+        begin();
+        try {
+            // The gate would block the wipe: the pixels being cleared are the ones the
+            // selection currently allows, and clearing them is not drawing inside it.
+            selection = null;
+            for (int i = inside.nextSetBit(0); i >= 0; i = inside.nextSetBit(i + 1))
+                uncover(under, i % width, i / width);
+        } finally { finish(); }
+        selection = was;
+        return true;
+    }
+
+    /**
+     * Cut the patch out of the page and paste it {@code dx},{@code dy} page pixels away
+     * as one undoable step, the selection following the pixels. This is what dropping a
+     * cut copy does, and what moving the current selection does.
+     */
+    void moveCut(Clipboard patch, int dx, int dy) {
+        idle();
+        if (patch == null || patch.empty()) throw new IllegalStateException("Nothing is selected");
+        Selection was = selection;
+        // Whatever the copy was sitting on. A paste overwrote it, so uncovering the copy
+        // can only restore it from this record; without one the copy leaves a blank hole
+        // exactly the shape of its own pixels.
+        Clipboard backing = was == null ? null : was.backing;
+        int edits = undo.size();
+        begin();
+        try {
+            // The page's selection may already sit over the drop point, so clear it while
+            // wiping the source: the gate would otherwise block every one of these pixels.
+            selection = null;
+            for (int row = 0; row < patch.height; row++) for (int col = 0; col < patch.width; col++) {
+                if (!patch.pixels.get(row * patch.width + col)) continue;
+                uncover(backing, patch.left + col, patch.top + row);
+            }
+            // The pixels land where the selection is going, so the gate lets them through.
+            selection = patch.selectionMovedBy(dx, dy, width, height);
+            // Remember what this copy covers at its new resting place, so the next move
+            // uncovers the drawing rather than a hole.
+            selection.backing = snapshotUnder(patch, dx, dy);
+            pasteInto(patch, dx, dy);
+        } finally { finish(); }
+        // Undo puts the selection back where the move started; redo brings it forward.
+        if (undo.size() > edits) {
+            Edit edit = undo.peekLast();
+            edit.from = was; edit.to = selection;
+        }
+    }
+
+    /**
+     * Put one page pixel back to whatever a placed copy found underneath it, or to bare
+     * paper when it has no such record. {@code under} is a patch of page content sharing
+     * the copy's box, so the page point maps straight into it.
+     */
+    private void uncover(Clipboard under, int x, int y) {
+        if (x < 0 || y < 0 || x >= width || y >= height) return;
+        int at = under == null ? -1 : (y - under.top) * under.width + (x - under.left);
+        boolean held = under != null && at >= 0 && at < under.pixels.size() && under.pixels.get(at);
+        setPixel(x, y, held ? under.tones[at] & 255 : 255, held ? under.alpha[at] & 255 : 0);
+    }
+
+    /**
+     * The page content under {@code patch} where it would land at {@code dx},{@code dy},
+     * as a patch of the same box. A placed copy keeps this so moving it can put the
+     * artwork it was covering back instead of leaving bare paper.
+     */
+    Clipboard snapshotUnder(Clipboard patch, int dx, int dy) {
+        byte[] heldTones = new byte[patch.width * patch.height];
+        byte[] heldAlpha = new byte[patch.width * patch.height];
+        java.util.BitSet covered = new java.util.BitSet(patch.width * patch.height);
+        for (int row = 0; row < patch.height; row++) for (int col = 0; col < patch.width; col++) {
+            if (!patch.pixels.get(row * patch.width + col)) continue;
+            int x = patch.left + col + dx, y = patch.top + row + dy;
+            if (x < 0 || y < 0 || x >= width || y >= height) continue;
+            int at = row * patch.width + col, page = y * width + x;
+            heldTones[at] = tones[page]; heldAlpha[at] = alpha[page];
+            covered.set(at);
+        }
+        return new Clipboard(patch.left + dx, patch.top + dy, patch.width, patch.height,
+                heldTones, heldAlpha, covered);
+    }
+    /**
+     * Move the selected pixels {@code dx},{@code dy} page pixels away as one undoable step:
+     * the area they came from goes back to paper and the selection follows the pixels.
+     */
+    void moveSelection(int dx, int dy) {
+        idle();
+        if (selection == null || selection.empty()) throw new IllegalStateException("Nothing is selected");
+        moveCut(copySelection(), dx, dy);
+    }
     /** Peel all the masking fluid off the page as one undoable step; false when there is none. */
     boolean peelMask() {
         idle(); if(!hasMask()) { mask=null; return false; }
@@ -364,6 +566,9 @@ final class ToneDocument {
         if(w>4096 || h>4096) throw new IllegalArgumentException("This canvas is too large to expand further.");
         validateSize((int)w,(int)h);
         if(w==width && h==height)return;
+        // A resized page no longer matches its selection's indices; drop it rather than
+        // leave it covering the wrong pixels.
+        selection=null;
         StackState old=new StackState(this);
         ArrayList<Layer> expanded=new ArrayList<>();
         for(Layer layer:layers) expanded.add(expanded(layer,(int)w,(int)h,left,top));
@@ -626,6 +831,12 @@ final class ToneDocument {
             for(int px=x;px<end;px++) if(gray==ERASE) setPixel(px,y,255,0); else setPixel(px,y,gray,255);
             return;
         }
+        if(selection!=null) {
+            // A selection keeps its own edges, so the span goes pixel by pixel like the mask path.
+            for(int px=x;px<end;px++) if(selection.contains(px,y))
+                setPixel(px,y,gray==ERASE?255:gray,gray==ERASE?0:255);
+            return;
+        }
         writable();
         int rowKey=(y/TILE)*columns();
         for(int column=x/TILE;column<=(end-1)/TILE;column++) {
@@ -673,6 +884,7 @@ final class ToneDocument {
     }
     /** Writes a pixel on the page, unless it already holds this, capturing its tile for Undo first. */
     private void store(int x,int y,int gray,int coverage) {
+        if(!allowed(x,y)) return;
         int i=y*width+x;
         if((tones[i]&255)==gray&&(alpha[i]&255)==coverage) return;
         int key=(y/TILE)*columns()+x/TILE;
@@ -744,7 +956,7 @@ final class ToneDocument {
         before.clear();
         Layer edited=bound; bind(layers.get(active));
         if (tiles.isEmpty()) return false;
-        if (continuation && !undo.isEmpty() && redo.isEmpty() && undo.peekLast().layer==edited) {
+        if (continuation && !undo.isEmpty() && redo.isEmpty() && undo.peekLast().layer==edited && undo.peekLast().from == null) {
             Edit previous = undo.removeLast(); historyBytes -= previous.bytes;
             LinkedHashMap<Integer, TileEdit> merged = new LinkedHashMap<>();
             for (TileEdit tile : previous.tiles) merged.put(tile.key, tile);
@@ -817,6 +1029,7 @@ final class ToneDocument {
             // Any other layer is masking fluid, laid since the page last had none.
             if(index<0) { mask=edit.layer; bind(mask); } else selectLayer(index);
             for (TileEdit tile : edit.tiles) restoreTile(tile.key, forward ? tile.after : tile.before);
+            if (edit.from != null || edit.to != null) selection = forward ? edit.to : edit.from;
             if(index<0) bind(layers.get(active));
         }
         target.addLast(edit); return true;
@@ -887,6 +1100,8 @@ final class ToneDocument {
         final ArrayList<TileEdit> tiles; final int bytes;
         final Layer layer;
         final StackState previous,next;
+        /** The selection a move began with and ended with; null on every other edit. */
+        Selection from, to;
         Edit(StackState previous,StackState next) {
             this.previous=previous; this.next=next; layer=null; tiles=null;
             int count=256;

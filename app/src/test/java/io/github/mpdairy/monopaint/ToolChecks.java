@@ -28,8 +28,8 @@ public final class ToolChecks {
         ToolLibrary library=new ToolLibrary();library.select(ToolSettings.Tool.BRUSH);library.edit(library.current().oilPaint(true).paintLoad(30));library.add("Oil");
         java.io.DataInputStream in=new java.io.DataInputStream(new java.io.ByteArrayInputStream(library.encode()));
         java.io.ByteArrayOutputStream bytes=new java.io.ByteArrayOutputStream();java.io.DataOutputStream out=new java.io.DataOutputStream(bytes);
-        in.readInt();out.writeInt(version);byte[] record=new byte[kept];int skipped=75-kept;
-        for(int i=0;i<25;i++){in.readFully(record);in.skipBytes(skipped);out.write(record);}
+        in.readInt();out.writeInt(version);byte[] record=new byte[kept];int skipped=76-kept;
+        for(int i=0;i<26;i++){in.readFully(record);in.skipBytes(skipped);if(i!=12)out.write(record);}
         out.writeUTF(in.readUTF());int count=in.readInt();out.writeInt(count);
         for(int i=0;i<count;i++){out.writeUTF(in.readUTF());out.writeUTF(in.readUTF());in.readFully(record);in.skipBytes(skipped);out.write(record);}
         check(in.read()==-1,"Paint load format fixture consumes every byte");
@@ -42,9 +42,9 @@ public final class ToolChecks {
         java.io.ByteArrayOutputStream bytes=new java.io.ByteArrayOutputStream();java.io.DataOutputStream out=new java.io.DataOutputStream(bytes);
         // Those formats predate the carry and oil paint fields that end each record.
         in.readInt();out.writeInt(version);byte[] record=new byte[54];
-        for(int i=0;i<25;i++){in.readFully(record);in.skipBytes(21);if(i<tools || i>=12)out.write(record);}
+        for(int i=0;i<26;i++){in.readFully(record);in.skipBytes(22);if(i<tools || i>12)out.write(record);}
         out.writeUTF(in.readUTF());int count=in.readInt();out.writeInt(count);
-        for(int i=0;i<count;i++){out.writeUTF(in.readUTF());out.writeUTF(in.readUTF());in.readFully(record);in.skipBytes(21);out.write(record);}
+        for(int i=0;i<count;i++){out.writeUTF(in.readUTF());out.writeUTF(in.readUTF());in.readFully(record);in.skipBytes(22);out.write(record);}
         check(in.read()==-1,"Previous format fixture consumes every byte");
         ToolLibrary restored=ToolLibrary.decode(bytes.toByteArray());
         check(restored.current().equals(library.current()) && restored.activeId().equals(library.activeId()),"Previous format retains the selected favorite");
@@ -99,10 +99,10 @@ public final class ToolChecks {
         java.io.DataInputStream in=new java.io.DataInputStream(new java.io.ByteArrayInputStream(library.encode()));
         java.io.ByteArrayOutputStream bytes=new java.io.ByteArrayOutputStream();java.io.DataOutputStream out=new java.io.DataOutputStream(bytes);
         in.readInt();out.writeInt(0x5453503d);byte[] record=new byte[47];
-        for(int i=0;i<25;i++){in.readFully(record);if(i<8 || i>11)out.write(record);in.readUnsignedByte();in.skipBytes(27);}
+        for(int i=0;i<26;i++){in.readFully(record);if(i<8 || i>12)out.write(record);in.readUnsignedByte();in.skipBytes(28);}
         out.writeUTF(in.readUTF());int count=in.readInt();out.writeInt(count);
         for(int i=0;i<count;i++) {
-            out.writeUTF(in.readUTF());out.writeUTF(in.readUTF());in.readFully(record);out.write(record);in.readUnsignedByte();in.skipBytes(27);
+            out.writeUTF(in.readUTF());out.writeUTF(in.readUTF());in.readFully(record);out.write(record);in.readUnsignedByte();in.skipBytes(28);
         }
         check(in.read()==-1,"Legacy fixture consumes every record");return bytes.toByteArray();
     }

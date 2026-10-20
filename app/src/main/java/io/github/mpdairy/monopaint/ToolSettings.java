@@ -40,7 +40,8 @@ final class ToolSettings {
         AIRBRUSH("Airbrush", Kind.COLORED),
         SHAPES("Shapes", Kind.COLORED),
         BRUSH_PEN("Brush pen", Kind.WATER),
-        WET_BRUSH_PEN("Wet brush pen", Kind.FLOWING_WATER);
+        WET_BRUSH_PEN("Wet brush pen", Kind.FLOWING_WATER),
+        SELECT("Selection", Kind.COLORLESS);
 
         final String label;
         /** Brushes share brush heads, wet canvas and transparent paint; they display as one Brush tool. */
@@ -72,6 +73,17 @@ final class ToolSettings {
         final String label;
         Shape(String label) { this.label=label; }
     }
+    /** How the Selection tool picks its region. */
+    enum SelectMode {
+        /** Trace a loop; the area you enclose becomes the selection. */
+        FREEHAND("Freehand"),
+        /** Tap an area; the connected tones around the tap become the selection. */
+        FILL("Fill"),
+        /** Drag the current selection, and any copy attached to the pen, to a new place. */
+        MOVE("Move");
+        final String label;
+        SelectMode(String label) { this.label=label; }
+    }
     final Shape shape;
     final boolean filled;
     final int outlineWidth;
@@ -94,6 +106,8 @@ final class ToolSettings {
     /** With opaque paint, the share of the paint under it, 0–100, that each wet brush pen stroke covers with its color. */
     final int coverage;
     final Gradient gradient;
+    /** The Selection tool's mode. */
+    final SelectMode selectMode;
     final Tool tool;
     final Head head;
     final int angle, bristles, headThickness;
@@ -106,9 +120,9 @@ final class ToolSettings {
                 DEFAULT_PRESSURE_RESPONSE, Head.ROUND, 0, 0, DEFAULT_HEAD_THICKNESS, Gradient.LINEAR, Shape.LINE, false, 3, 0, UNLIMITED_PAINT, DEFAULT_LOADING_SPEED, DEFAULT_MINIMUM_LOAD);
     }
     ToolSettings(Tool tool, int minimum, int maximum, int tip, int softness, boolean tilt, int hardness, int tolerance, int strength, int pressureResponse, Head head, int angle, int bristles, int headThickness, Gradient gradient, Shape shape, boolean filled, int outlineWidth, int carry, int paintLoad, int loadingSpeed, int minimumLoad) {
-        this(tool, minimum, maximum, tip, softness, tilt, hardness, tolerance, strength, pressureResponse, head, angle, bristles, headThickness, gradient, shape, filled, outlineWidth, carry, paintLoad, loadingSpeed, minimumLoad, false, DEFAULT_COVERAGE);
+        this(tool, minimum, maximum, tip, softness, tilt, hardness, tolerance, strength, pressureResponse, head, angle, bristles, headThickness, gradient, shape, filled, outlineWidth, carry, paintLoad, loadingSpeed, minimumLoad, false, DEFAULT_COVERAGE, SelectMode.FREEHAND);
     }
-    private ToolSettings(Tool tool, int minimum, int maximum, int tip, int softness, boolean tilt, int hardness, int tolerance, int strength, int pressureResponse, Head head, int angle, int bristles, int headThickness, Gradient gradient, Shape shape, boolean filled, int outlineWidth, int carry, int paintLoad, int loadingSpeed, int minimumLoad, boolean clearWater, int coverage) {
+    private ToolSettings(Tool tool, int minimum, int maximum, int tip, int softness, boolean tilt, int hardness, int tolerance, int strength, int pressureResponse, Head head, int angle, int bristles, int headThickness, Gradient gradient, Shape shape, boolean filled, int outlineWidth, int carry, int paintLoad, int loadingSpeed, int minimumLoad, boolean clearWater, int coverage, SelectMode selectMode) {
         if(shape==null || outlineWidth<1 || outlineWidth>128) throw new IllegalArgumentException("Invalid shape settings");
         this.shape=shape; this.filled=filled; this.outlineWidth=outlineWidth; this.carry=carry; this.paintLoad=paintLoad; this.loadingSpeed=loadingSpeed; this.minimumLoad=minimumLoad;
         this.clearWater = clearWater && tool.flowing; this.coverage = coverage;
@@ -118,6 +132,7 @@ final class ToolSettings {
                 || softness < 0 || softness > 100 || hardness < 0 || hardness > 100 || tolerance < 0 || tolerance > 100 || carry < 0 || carry > 100 || paintLoad < 1 || paintLoad > UNLIMITED_PAINT || loadingSpeed < 0 || loadingSpeed > 100 || minimumLoad < 0 || minimumLoad > 100 || strength < 0 || strength > 100 || pressureResponse < 0 || pressureResponse > 100)
             throw new IllegalArgumentException("Invalid tool settings");
         this.gradient=gradient; this.tool = tool; this.head = head; this.angle = angle; this.bristles = bristles; this.headThickness = headThickness; this.minimum = minimum; this.maximum = maximum; this.tip = Math.max(minimum,Math.min(tip,maximum));
+        this.selectMode = selectMode == null ? SelectMode.FREEHAND : selectMode;
         this.softness = softness; this.soft = softness > 0; this.tilt = tilt; this.hardness = hardness; this.tolerance = tolerance; this.strength = strength;
         this.pressureResponse = pressureResponse;
         // Brushes span linear (0) to quartic (100). The brush pen's pull centers on
@@ -126,7 +141,7 @@ final class ToolSettings {
     }
     private ToolSettings(Values v) {
         this(v.tool, v.minimum, v.maximum, v.tip, v.softness, v.tilt, v.hardness, v.tolerance, v.strength, v.pressureResponse,
-                v.head, v.angle, v.bristles, v.headThickness, v.gradient, v.shape, v.filled, v.outlineWidth, v.carry, v.paintLoad, v.loadingSpeed, v.minimumLoad, v.clearWater, v.coverage);
+                v.head, v.angle, v.bristles, v.headThickness, v.gradient, v.shape, v.filled, v.outlineWidth, v.carry, v.paintLoad, v.loadingSpeed, v.minimumLoad, v.clearWater, v.coverage, v.selectMode);
     }
     /** First-install settings; the toolbar's tools were tuned by hand on a Manta. */
     static ToolSettings defaults(Tool tool) {
@@ -142,6 +157,7 @@ final class ToolSettings {
             case SOFTEN: return settings.size(57).minimum(19);
             case AIRBRUSH: return settings.size(86).minimum(36).softness(88).strength(18);
             case FILL: return settings.gradient(Gradient.FLAT);
+            case SELECT: return settings.size(24).minimum(4).tolerance(12);
             default: return settings;
         }
     }
@@ -154,7 +170,7 @@ final class ToolSettings {
 
     /** Mutable copy used to derive a changed, validated settings object. */
     private static final class Values {
-        Tool tool; Head head; Gradient gradient; Shape shape;
+        Tool tool; Head head; Gradient gradient; Shape shape; SelectMode selectMode;
         int minimum, maximum, tip, softness, hardness, tolerance, strength, pressureResponse, angle, bristles, headThickness, outlineWidth, carry, paintLoad, loadingSpeed, minimumLoad, coverage;
         boolean tilt, filled, clearWater;
     }
@@ -166,7 +182,7 @@ final class ToolSettings {
         v.tolerance = tolerance; v.strength = strength; v.pressureResponse = pressureResponse; v.angle = angle;
         v.bristles = bristles; v.headThickness = headThickness; v.outlineWidth = outlineWidth;
         v.tilt = tilt; v.filled = filled; v.carry = carry; v.paintLoad = paintLoad; v.loadingSpeed = loadingSpeed; v.minimumLoad = minimumLoad;
-        v.clearWater = clearWater; v.coverage = coverage;
+        v.clearWater = clearWater; v.coverage = coverage; v.selectMode = selectMode;
         change.apply(v);
         return new ToolSettings(v);
     }
@@ -213,6 +229,7 @@ final class ToolSettings {
     ToolSettings minimumLoad(int value) { return with(v -> v.minimumLoad = value); }
     ToolSettings clearWater(boolean value) { return with(v -> v.clearWater = value); }
     ToolSettings coverage(int value) { return with(v -> v.coverage = value); }
+    ToolSettings selectMode(SelectMode value) { return with(v -> v.selectMode = value); }
     /** The wet brush pen, unless it lays {@link #clearWater}: it holds the ink it is dipped in or soaks up between strokes. */
     boolean holdsInk() { return tool.flowing && !clearWater; }
     /** Turns limited paint on with a moderate load, or off. */
@@ -243,6 +260,7 @@ final class ToolSettings {
         if (tool == Tool.SHAPES) return shape.label + (shape == Shape.LINE ? "" : filled ? " filled" : " outline");
         if (isBrush()) return head.label + " " + label();
         if (tool == Tool.FILL) return gradient == Gradient.FLAT ? "Flat fill" : gradient.label + " gradient";
+        if (tool == Tool.SELECT) return selectMode.label + " selection";
         return label();
     }
     /** The measured .05–.45 pen pressure range as 0–1. */
@@ -289,7 +307,7 @@ final class ToolSettings {
     @Override public boolean equals(Object other) {
         if (!(other instanceof ToolSettings)) return false;
         ToolSettings s = (ToolSettings)other;
-        return tool == s.tool && minimum == s.minimum && maximum == s.maximum && tip == s.tip && softness == s.softness && tilt == s.tilt && hardness == s.hardness && tolerance == s.tolerance && strength == s.strength && pressureResponse == s.pressureResponse && head == s.head && angle == s.angle && bristles == s.bristles && headThickness == s.headThickness && gradient == s.gradient && shape == s.shape && filled == s.filled && outlineWidth == s.outlineWidth && carry == s.carry && paintLoad == s.paintLoad && loadingSpeed == s.loadingSpeed && minimumLoad == s.minimumLoad && clearWater == s.clearWater && coverage == s.coverage;
+        return tool == s.tool && minimum == s.minimum && maximum == s.maximum && tip == s.tip && softness == s.softness && tilt == s.tilt && hardness == s.hardness && tolerance == s.tolerance && strength == s.strength && pressureResponse == s.pressureResponse && head == s.head && angle == s.angle && bristles == s.bristles && headThickness == s.headThickness && gradient == s.gradient && shape == s.shape && filled == s.filled && outlineWidth == s.outlineWidth && carry == s.carry && paintLoad == s.paintLoad && loadingSpeed == s.loadingSpeed && minimumLoad == s.minimumLoad && clearWater == s.clearWater && coverage == s.coverage && selectMode == s.selectMode;
     }
-    @Override public int hashCode() { return java.util.Objects.hash(tool, minimum, maximum, tip, softness, tilt, hardness, tolerance, strength, pressureResponse, head, angle, bristles, headThickness, gradient, shape, filled, outlineWidth, carry, paintLoad, loadingSpeed, minimumLoad, clearWater, coverage); }
+    @Override public int hashCode() { return java.util.Objects.hash(tool, minimum, maximum, tip, softness, tilt, hardness, tolerance, strength, pressureResponse, head, angle, bristles, headThickness, gradient, shape, filled, outlineWidth, carry, paintLoad, loadingSpeed, minimumLoad, clearWater, coverage, selectMode); }
 }

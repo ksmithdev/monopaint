@@ -19,6 +19,7 @@ final class ToolIcons {
             case BRUSH: return R.drawable.ic_brush;
             case BRUSH_PEN: return R.drawable.ic_brush_pen;
             case WET_BRUSH_PEN: return R.drawable.ic_wet_brush_pen;
+            case SELECT: return R.drawable.ic_select;
             default: throw new IllegalArgumentException("No icon for " + tool);
         }
     }
@@ -52,5 +53,10 @@ final class ToolIcons {
     static int fill(ToolSettings.Gradient type) {
         return type == ToolSettings.Gradient.FLAT ? R.drawable.ic_fill
                 : type == ToolSettings.Gradient.LINEAR ? R.drawable.ic_fill_linear : R.drawable.ic_fill_circular;
+    }
+
+    static int select(ToolSettings.SelectMode mode) {
+        return mode == ToolSettings.SelectMode.FREEHAND ? R.drawable.ic_select_freehand
+                : mode == ToolSettings.SelectMode.FILL ? R.drawable.ic_select_fill : R.drawable.ic_select_move;
     }
 }

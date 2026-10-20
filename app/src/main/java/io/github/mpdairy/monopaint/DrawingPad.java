@@ -4,6 +4,7 @@ import android.annotation.SuppressLint;
 import android.graphics.Bitmap;
 import android.graphics.Canvas;
 import android.graphics.Color;
+import android.graphics.DashPathEffect;
 import android.graphics.Matrix;
 import android.graphics.Paint;
 import android.graphics.Rect;
@@ -105,12 +106,34 @@ final class DrawingPad extends View {
     private int fillShade, fillOriginalGray, fillTolerance;
     private ToolSettings.Gradient fillGradient = ToolSettings.Gradient.LINEAR;
     private final Paint gradientGuide = new Paint();
-    /** Presented pixels the gradient guide is drawn over; empty when it is not shown. */
-    private final java.util.ArrayList<Rect> guideTiles = new java.util.ArrayList<>();
-    /** The presented pixels under {@link #guideTiles}, in order, restored to erase the guide. */
-    private int[] guideBackground = new int[0];
+    /** The gradient guide's saved pixels, drawn through the shared overlay helper. */
+    private final Overlay gradientGuideOverlay;
     private final Runnable gradientStep = this::advanceGradient;
     private final Runnable fillStep = this::advanceFill;
+
+    // Selection
+    /** Pixels copied out of a layer, ready to paste or drag to a new place. */
+    Clipboard clipboard;
+    /** The pen is tracing a freehand selection. */
+    private boolean selectGesture;
+    /** The pen is dragging the selection or the copy attached to the pen. */
+    private boolean moveGesture;
+    private float[] trace = new float[512];
+    private int tracePoints;
+    /**
+     * The offset the copy had when the drag began, and the press point it is measured from.
+     * Keeping the anchor fixed and rounding once from it matters: adding a rounded delta per
+     * event throws away each event's fraction, and over a long drag those fractions add up
+     * until the copy lags noticeably behind the pen.
+     */
+    private int moveBaseX, moveBaseY;
+    private float moveAnchorX, moveAnchorY;
+    /** The selection's marching border, drawn over the presented raster. */
+    private final Overlay selectionBorder;
+    /** A region fill started by the selection tool rather than the paint fill. */
+    private boolean selectingRegion;
+    /** The picking mode to go back to when a Move gesture lets the selection go. */
+    private ToolSettings.SelectMode pickMode = ToolSettings.SelectMode.FREEHAND;
 
     // Finger taps and pinch/pan
     private final MultiFingerTap fingerTaps = new MultiFingerTap();
@@ -129,12 +152,14 @@ final class DrawingPad extends View {
     private float referenceLastX, referenceLastY;
     private boolean referenceDragStarted;
     /** Presented pixels the rotate/scale outline is drawn over; empty when it is not shown. */
-    private final java.util.ArrayList<Rect> outlineTiles = new java.util.ArrayList<>();
-    private int[] outlineBackground = new int[0];
+    private final Overlay outlineOverlay;
     private float[] outlineTransform;
 
     DrawingPad(PaintActivity app) {
         super(app); this.app = app; landscapeTilt = app.device.landscapeTilt;
+        selectionBorder = new Overlay(app);
+        gradientGuideOverlay = new Overlay(app);
+        outlineOverlay = new Overlay(app);
         setContentDescription("Painting canvas; use the pen to paint. Unlock Zoom to pinch and pan with two fingers.");
         input = new NativePen(this, (bitmap, region) -> bitmap.recycle());
     }
@@ -286,8 +311,16 @@ final class DrawingPad extends View {
         }
         pending.clear();
         if (viewportBitmap != null) viewportBitmap.update(display, pageToView, null);
+        redrawOverlays();
+    }
+    /** Put the selection border and gradient guide back after a re-render replaced the raster under them. */
+    private void redrawOverlays() {
         redrawGradientGuide();
         redrawReferenceOutline();
+        // The rendered pixels are fresh; drop the border's saved background rather than
+        // restore it over the artwork just drawn.
+        selectionBorder.discard();
+        if (!moveGesture) drawSelectionBorder();
     }
     /** Draws the masking fluid's hatching over the freshly composed page. */
     private void drawMask() {
@@ -314,7 +347,7 @@ final class DrawingPad extends View {
         disconnectDisplay(); ensureDisplay(); updateViewport(); renderAll(); invalidate(); post(this::connectDisplay);
     }
     boolean blocksFingerGesture() {
-        return pointer!=-1 || pickPointer!=-1 || fillGesture || hasGradient()
+        return pointer!=-1 || pickPointer!=-1 || fillGesture || selectGesture || moveGesture || hasGradient()
                 || SystemClock.uptimeMillis()<penGuardUntil;
     }
     /** Re-renders the document's changed area and queues it for presentation. */
@@ -323,12 +356,19 @@ final class DrawingPad extends View {
         int[] bounds = document.dirty();
         if (bounds == null) return;
         // The guide's and the outline's saved backgrounds must not cover the newly rendered artwork.
-        boolean guide = !guideTiles.isEmpty();
-        boolean outline = !outlineTiles.isEmpty();
+        boolean guide = gradientGuideOverlay.showing();
+        boolean outline = outlineOverlay.showing();
+        boolean border = selectionBorder.showing() && !moveGesture;
         eraseGradientGuide();
         eraseReferenceOutline();
         Rect dirty = new Rect(Math.max(0, bounds[0] - 2), Math.max(0, bounds[1] - 2),
                 Math.min(document.width, bounds[2] + 2), Math.min(document.height, bounds[3] + 2));
+        // Only the border crossing the stroke is taken back and redrawn, so a long
+        // selection border costs a few tiles per frame rather than its whole length.
+        // Its saved pixels must be put back before the render, or the render's artwork
+        // would be covered by pixels it already replaced.
+        if (border) selectionBorder.restore(viewRect(dirty), presented(), this::queueView);
+        else hideSelectionBorder();
         if (dirty.intersect(0, 0, display.getWidth(), display.getHeight())) {
             render(dirty);
             queue(dirty);
@@ -336,6 +376,7 @@ final class DrawingPad extends View {
         document.clearDirty();
         if (guide) drawGradientGuide();
         if (outline) drawReferenceOutline();
+        if (border) touchSelectionBorder(dirty);
     }
     /** Queues page pixels that are already up to date in {@link #display}. */
     private void queue(Rect pageArea) {
@@ -364,65 +405,223 @@ final class DrawingPad extends View {
      * black/white for {@link #beginFastPreview}.
      */
     private void drawGradientGuide() {
-        eraseGradientGuide();
         Bitmap target = presented();
         if (target == null) return;
         float[] axis = {fillStartX, fillStartY, fillEndX, fillEndY};
         // The unzoomed page raster is only rotated (never scaled) relative to the view.
         if (viewportBitmap != null) pageToView.mapPoints(axis);
-        // Short segments keep a long diagonal guide's damage to a band along the line.
-        int segments = Math.max(1, (int)Math.ceil(Math.hypot(axis[2]-axis[0], axis[3]-axis[1]) / dp(48)));
-        int saved = 0;
-        RectF bounds = new RectF();
-        for (int i = 0; i < segments; i++) {
-            float a = (float)i / segments, b = (float)(i+1) / segments;
-            float x0 = axis[0]+(axis[2]-axis[0])*a, y0 = axis[1]+(axis[3]-axis[1])*a;
-            float x1 = axis[0]+(axis[2]-axis[0])*b, y1 = axis[1]+(axis[3]-axis[1])*b;
-            bounds.set(Math.min(x0, x1), Math.min(y0, y1), Math.max(x0, x1), Math.max(y0, y1));
-            bounds.inset(-dp(6), -dp(6));
-            Rect tile = new Rect(); bounds.roundOut(tile);
-            if (!tile.intersect(0, 0, target.getWidth(), target.getHeight())) continue;
-            guideTiles.add(tile); saved += tile.width() * tile.height();
-        }
-        if (guideBackground.length < saved) guideBackground = new int[saved];
-        // Save every tile before drawing; overlapping tiles are restored in reverse.
-        int offset = 0;
-        for (Rect tile : guideTiles) {
-            target.getPixels(guideBackground, offset, tile.width(), tile.left, tile.top, tile.width(), tile.height());
-            offset += tile.width() * tile.height();
-        }
-        Canvas canvas = new Canvas(target);
-        gradientGuide.setStyle(Paint.Style.STROKE);
-        gradientGuide.setColor(Color.WHITE); gradientGuide.setStrokeWidth(dp(5));
-        canvas.drawLine(axis[0], axis[1], axis[2], axis[3], gradientGuide);
-        gradientGuide.setColor(Color.BLACK); gradientGuide.setStrokeWidth(dp(2));
-        canvas.drawLine(axis[0], axis[1], axis[2], axis[3], gradientGuide);
-        gradientGuide.setStyle(Paint.Style.FILL);
-        canvas.drawCircle(axis[0], axis[1], dp(4), gradientGuide);
-        canvas.drawCircle(axis[2], axis[3], dp(4), gradientGuide);
-        for (Rect tile : guideTiles) queueView(tile);
+        gradientGuideOverlay.show(target, new float[][]{axis}, this::queueView, canvas -> {
+            gradientGuide.setStyle(Paint.Style.STROKE);
+            gradientGuide.setColor(Color.WHITE); gradientGuide.setStrokeWidth(dp(5));
+            canvas.drawLine(axis[0], axis[1], axis[2], axis[3], gradientGuide);
+            gradientGuide.setColor(Color.BLACK); gradientGuide.setStrokeWidth(dp(2));
+            canvas.drawLine(axis[0], axis[1], axis[2], axis[3], gradientGuide);
+            gradientGuide.setStyle(Paint.Style.FILL);
+            canvas.drawCircle(axis[0], axis[1], dp(4), gradientGuide);
+            canvas.drawCircle(axis[2], axis[3], dp(4), gradientGuide);
+        });
     }
     /** Restores the pixels under the gradient guide and queues them. */
-    private void eraseGradientGuide() {
-        if (guideTiles.isEmpty()) return;
-        Bitmap target = presented();
-        int offset = 0;
-        for (Rect tile : guideTiles) offset += tile.width() * tile.height();
-        for (int i = guideTiles.size()-1; i >= 0; i--) {
-            Rect tile = guideTiles.get(i);
-            offset -= tile.width() * tile.height();
-            target.setPixels(guideBackground, offset, tile.width(), tile.left, tile.top, tile.width(), tile.height());
-            queueView(tile);
-        }
-        guideTiles.clear();
-    }
+    private void eraseGradientGuide() { gradientGuideOverlay.hide(presented(), this::queueView); }
     /** Draws the guide again after a re-render replaced the raster under it. */
     private void redrawGradientGuide() {
-        guideTiles.clear();
+        gradientGuideOverlay.discard();
         if (showsGradientGuide()) drawGradientGuide();
     }
     /** Removes the gradient guide from the screen. */
     private void clearGradientGuide() { eraseGradientGuide(); flush(true); }
+
+    // Selection border
+
+    /** Draws the border around the page's selection over the whole presented raster. */
+    private void drawSelectionBorder() {
+        Selection selection = document == null ? null : document.selection();
+        if (selection == null || selection.empty()) { hideSelectionBorder(); return; }
+        // A full redraw must measure the tiles the border covers; only the incremental
+        // touch below can reuse the measurement.
+        showSelection(selectionBorder, toView(selection.border()), clipboard == null ? null : this::paintCopy);
+    }
+    /** Redraws only the part of the selection border inside a page area, over the artwork just rendered there. */
+    private void touchSelectionBorder(Rect pageArea) {
+        selectionBorder.rearm(presented(), viewRect(pageArea), this::queueView, this::selectionInkNow);
+    }
+    /**
+     * The border and, while a copy is held, the copy's own pixels: the ghost shows what
+     * will be placed, not just an empty outline. Nothing is drawn when the page has no
+     * selection, which leaves the tiles the overlay saved already restored.
+     */
+    private void selectionInkNow(Canvas canvas) {
+        Selection selection = document == null ? null : document.selection();
+        if (selection == null || selection.empty()) return;
+        if (clipboard != null) paintCopy(canvas);
+        selectionInk(canvas, toView(selection.border()));
+    }
+    /** A page rectangle in the coordinates of the presented raster. */
+    private Rect viewRect(Rect pageArea) {
+        if (viewportBitmap == null) return new Rect(pageArea);
+        float[] corners = { pageArea.left, pageArea.top, pageArea.right, pageArea.bottom };
+        pageToView.mapPoints(corners);
+        return new Rect((int)Math.floor(Math.min(corners[0], corners[2])), (int)Math.floor(Math.min(corners[1], corners[3])),
+                (int)Math.ceil(Math.max(corners[0], corners[2])), (int)Math.ceil(Math.max(corners[1], corners[3])));
+    }
+    /** Page-coordinate polylines as view-coordinate ones, for when the page is zoomed.
+     * Cached per selection and viewport: a lasso's outline is thousands of points and
+     * the border is redrawn on every paint frame. */
+    private float[][] viewLines;
+    private float[][] viewLinesSource;
+    private android.graphics.Matrix viewLinesMatrix;
+    private float[][] toView(float[][] lines) {
+        if (viewportBitmap == null) return lines;
+        if (viewLines != null && viewLinesSource == lines && viewLinesMatrix != null && viewLinesMatrix.equals(pageToView))
+            return viewLines;
+        float[][] at = new float[lines.length][];
+        for (int i = 0; i < lines.length; i++) {
+            at[i] = lines[i].clone();
+            pageToView.mapPoints(at[i]);
+        }
+        viewLines = at; viewLinesSource = lines; viewLinesMatrix = new android.graphics.Matrix(pageToView);
+        return at;
+    }
+    /**
+     * The selection's outline as a dashed black line over a solid white halo, so it
+     * reads on any artwork.
+     */
+    private void showSelection(Overlay overlay, float[][] lines) { showSelection(overlay, lines, null); }
+    /** {@code under} paints the held copy inside the border, so a cut's ghost is not blank. */
+    private void showSelection(Overlay overlay, float[][] lines, Overlay.Ink under) {
+        overlay.show(presented(), lines, under == null ? null : copyBox(), this::queueView, canvas -> {
+            if (under != null) under.draw(canvas);
+            selectionInk(canvas, lines);
+        });
+    }
+    /**
+     * The dashed selection line over a solid white halo, so it reads on any artwork.
+     *
+     * <p>Only the stretches of border that fall inside the canvas clip are stroked. Skia
+     * charges for the path it is handed, not for the part of the canvas that survives the
+     * clip, so stroking a whole lasso to repaint one brush stroke's corner pays for the
+     * lasso's full length on every frame of that stroke. That is what made drawing inside
+     * a big selection slower than drawing outside one. Culling keeps a stroke frame's
+     * border cost flat however large the selection is.</p>
+     *
+     * <p>Each stretch restarts the dash pattern at its own distance along the border, so
+     * the dashes stay pinned to the page instead of sliding along it as the clip follows
+     * the pen. Halos all go down before any dash, as they did when the border was one
+     * path, so overlapping stretches of border look the same as before.</p>
+     */
+    private void selectionInk(Canvas canvas, float[][] lines) {
+        Rect clip = canvas.getClipBounds();
+        // Far enough past the halo's widest join that no cut end or miter spike of a
+        // dropped stretch can reach into the clip and leave a nick in the line.
+        float reach = dp(12);
+        java.util.List<BorderRun> runs = new java.util.ArrayList<>();
+        for (float[] line : lines) {
+            int i = 0;
+            double arc = 0;
+            while (i + 3 < line.length) {
+                while (i + 3 < line.length && !meets(line, i, clip, reach)) { arc += span(line, i); i += 2; }
+                if (i + 3 >= line.length) break;
+                android.graphics.Path run = new android.graphics.Path();
+                run.moveTo(line[i], line[i + 1]);
+                double start = arc;
+                while (i + 3 < line.length && meets(line, i, clip, reach)) {
+                    run.lineTo(line[i + 2], line[i + 3]);
+                    arc += span(line, i);
+                    i += 2;
+                }
+                runs.add(new BorderRun(run, start));
+            }
+        }
+        selectionHalo.setStyle(Paint.Style.STROKE);
+        selectionHalo.setColor(Color.WHITE); selectionHalo.setStrokeWidth(dp(4));
+        for (BorderRun run : runs) canvas.drawPath(run.path, selectionHalo);
+        selectionDash.setStyle(Paint.Style.STROKE);
+        selectionDash.setColor(Color.BLACK); selectionDash.setStrokeWidth(dp(2));
+        for (BorderRun run : runs) {
+            selectionDash.setPathEffect(dashAt(run.phase));
+            canvas.drawPath(run.path, selectionDash);
+        }
+    }
+    /** One stretch of the selection border inside the clip, and how far along the border it starts. */
+    private static final class BorderRun {
+        final android.graphics.Path path; final double phase;
+        BorderRun(android.graphics.Path path, double phase) { this.path = path; this.phase = phase; }
+    }
+    /** Whether segment `i` of the polyline comes within `reach` of the clip. */
+    private static boolean meets(float[] line, int i, Rect clip, float reach) {
+        return Math.min(line[i], line[i + 2]) < clip.right + reach
+            && Math.max(line[i], line[i + 2]) > clip.left - reach
+            && Math.min(line[i + 1], line[i + 3]) < clip.bottom + reach
+            && Math.max(line[i + 1], line[i + 3]) > clip.top - reach;
+    }
+    private static double span(float[] line, int i) {
+        return Math.hypot(line[i + 2] - line[i], line[i + 3] - line[i + 1]);
+    }
+    private final Paint selectionHalo = new Paint();
+    private final Paint selectionDash = new Paint();
+    private float[] dashIntervals;
+    /** The dash pattern shifted to where this stretch starts along the border, so dashes stay pinned to the page. */
+    private DashPathEffect dashAt(double arc) {
+        if (dashIntervals == null) dashIntervals = new float[]{ dp(6), dp(8) };
+        float cycle = dashIntervals[0] + dashIntervals[1];
+        return new DashPathEffect(dashIntervals, (float) (arc % cycle));
+    }
+    /** The view-space box the held copy would cover at its current offset, or null. */
+    private Rect copyBox() {
+        if (clipboard == null || clipboard.empty()) return null;
+        float[] corners = { clipboard.left + moveDx, clipboard.top + moveDy,
+                clipboard.left + moveDx + clipboard.width, clipboard.top + moveDy + clipboard.height };
+        if (viewportBitmap != null) pageToView.mapPoints(corners);
+        return new Rect((int)Math.floor(Math.min(corners[0], corners[2])), (int)Math.floor(Math.min(corners[1], corners[3])),
+                (int)Math.ceil(Math.max(corners[0], corners[2])), (int)Math.ceil(Math.max(corners[1], corners[3])));
+    }
+    /**
+     * Draw the held copy's pixels into the presented raster at the current drag offset.
+     * The bitmap is built once per copy and reused: rebuilding it every frame allocates
+     * the whole patch again on each stroke frame, which makes drawing crawl.
+     */
+    private Bitmap copyBitmap;
+    private Clipboard copyBitmapSource;   // the clipboard this bitmap was built from
+    private void paintCopy(Canvas canvas) {
+        // Before the first tap places the copy it has no home on the page. Inking it at its
+        // original spot would redraw the very pixels a cut just took off, leaving the page
+        // looking untouched. The outline alone shows where the copy came from until then.
+        if (clipboard == null || clipboard.empty() || !copyPlaced) return;
+        if (copyBitmap == null || copyBitmapSource != clipboard) {
+            int[] px = new int[clipboard.width * clipboard.height];
+            for (int i = 0; i < px.length; i++) {
+                int a = clipboard.pixels.get(i) ? clipboard.alpha[i] & 255 : 0;
+                int t = clipboard.tones[i] & 255;
+                // ARGB bitmaps are premultiplied: the tone must be scaled by its own alpha.
+                int c = (t * a + 127) / 255;
+                px[i] = (a << 24) | (c << 16) | (c << 8) | c;
+            }
+            if (copyBitmap != null) copyBitmap.recycle();
+            copyBitmap = Bitmap.createBitmap(px, clipboard.width, clipboard.height, Bitmap.Config.ARGB_8888);
+            copyBitmapSource = clipboard;
+        }
+        // The bitmap is patch-local: pixel 0,0 is the patch's own left,top on the page.
+        // Translate by that origin plus the drag in page space, before the page-to-view
+        // rotation. With no viewport bitmap the raster the canvas draws into IS the page,
+        // so applying the rotation here would spin the copy off in the wrong direction.
+        Matrix at = viewportBitmap == null ? new Matrix() : new Matrix(pageToView);
+        at.preTranslate(clipboard.left + moveDx, clipboard.top + moveDy);
+        if (copyPaint == null) {
+            copyPaint = new Paint();
+            copyPaint.setFilterBitmap(false); // keep the pixels as hard squares, like the page itself
+        }
+        canvas.drawBitmap(copyBitmap, at, copyPaint);
+    }
+    private Paint copyPaint;
+    /** Restores the pixels under the border and queues them, so the dashes leave the panel. */
+    private void hideSelectionBorder() { selectionBorder.hide(presented(), this::queueView); }
+    /** Redraws the border over the current pixels, for example after a layer change. */
+    void refreshSelectionBorder() {
+        if (moveGesture) return;
+        hideSelectionBorder();
+        drawSelectionBorder();
+        flush(true);
+    }
 
     /** Re-renders what the last reference change dirtied, limited to its band. */
     void renderReferenceChange() {
@@ -436,7 +635,7 @@ final class DrawingPad extends View {
     private void renderReferenceBand(int[] bounds) {
         if (document == null || display == null || bounds == null) return;
         // The gradient guide's saved background and the zoomed raster need the slow path.
-        if (!guideTiles.isEmpty() || viewportBitmap != null) { renderDirty(); return; }
+        if (gradientGuideOverlay.showing() || viewportBitmap != null) { renderDirty(); return; }
         Rect area = new Rect(Math.max(0, bounds[0] - 2), Math.max(0, bounds[1] - 2),
                 Math.min(document.width, bounds[2] + 2), Math.min(document.height, bounds[3] + 2));
         if (area.isEmpty()) { document.clearDirty(); return; }
@@ -529,52 +728,27 @@ final class DrawingPad extends View {
     void redrawReferenceOutline() {
         if (outlineTransform == null) return;
         // The rendered pixels are fresh; drop the saved background instead of restoring it over them.
-        outlineTiles.clear();
+        outlineOverlay.discard();
         drawReferenceOutline();
     }
     private void drawReferenceOutline() {
-        if (outlineTransform != null && !outlineTiles.isEmpty()) eraseReferenceOutline();
         if (outlineTransform == null) return;
         Bitmap target = presented();
         if (target == null) return;
         float[] corners = outlineCorners();
         // Tile along the four edges so a full-page reference damages only a band per frame.
-        int saved = 0;
-        RectF bounds = new RectF();
-        for (int edge = 0; edge < 4; edge++) {
-            float x0 = corners[edge * 2], y0 = corners[edge * 2 + 1];
-            float x1 = corners[((edge + 1) % 4) * 2], y1 = corners[((edge + 1) % 4) * 2 + 1];
-            int segments = Math.max(1, (int)Math.ceil(Math.hypot(x1 - x0, y1 - y0) / dp(48)));
-            for (int i = 0; i < segments; i++) {
-                float a = (float)i / segments, b = (float)(i + 1) / segments;
-                float ax = x0 + (x1 - x0) * a, ay = y0 + (y1 - y0) * a;
-                float bx = x0 + (x1 - x0) * b, by = y0 + (y1 - y0) * b;
-                bounds.set(Math.min(ax, bx), Math.min(ay, by), Math.max(ax, bx), Math.max(ay, by));
-                bounds.inset(-dp(6), -dp(6));
-                Rect tile = new Rect();
-                bounds.roundOut(tile);
-                if (tile.intersect(0, 0, target.getWidth(), target.getHeight())) {
-                    outlineTiles.add(tile);
-                    saved += tile.width() * tile.height();
-                }
-            }
-        }
-        if (outlineBackground.length < saved) outlineBackground = new int[saved];
-        // Save every tile before drawing; overlapping tiles restore in reverse.
-        int offset = 0;
-        for (Rect tile : outlineTiles) {
-            target.getPixels(outlineBackground, offset, tile.width(), tile.left, tile.top, tile.width(), tile.height());
-            offset += tile.width() * tile.height();
-        }
-        Canvas canvas = new Canvas(target);
-        Paint paint = new Paint();
-        paint.setStyle(Paint.Style.STROKE);
-        paint.setColor(Color.WHITE); paint.setStrokeWidth(dp(5));
-        drawOutlinePath(canvas, corners, paint);
-        paint.setColor(Color.BLACK); paint.setStrokeWidth(dp(2));
-        drawOutlinePath(canvas, corners, paint);
-        paint.setStyle(Paint.Style.FILL);
-        for (Rect tile : outlineTiles) queueView(tile);
+        float[] edges = {corners[0], corners[1], corners[2], corners[3],
+                corners[2], corners[3], corners[4], corners[5],
+                corners[4], corners[5], corners[6], corners[7],
+                corners[6], corners[7], corners[0], corners[1]};
+        outlineOverlay.show(target, new float[][]{edges}, this::queueView, canvas -> {
+            Paint paint = new Paint();
+            paint.setStyle(Paint.Style.STROKE);
+            paint.setColor(Color.WHITE); paint.setStrokeWidth(dp(5));
+            drawOutlinePath(canvas, corners, paint);
+            paint.setColor(Color.BLACK); paint.setStrokeWidth(dp(2));
+            drawOutlinePath(canvas, corners, paint);
+        });
     }
     /** The image's four corners mapped through the candidate transform, then to view space. */
     private float[] outlineCorners() {
@@ -599,19 +773,7 @@ final class DrawingPad extends View {
         canvas.drawPath(path, paint);
     }
     /** Restore the pixels under the outline and queue them. */
-    private void eraseReferenceOutline() {
-        if (outlineTiles.isEmpty()) return;
-        Bitmap target = presented();
-        int offset = 0;
-        for (Rect tile : outlineTiles) offset += tile.width() * tile.height();
-        for (int i = outlineTiles.size() - 1; i >= 0; i--) {
-            Rect tile = outlineTiles.get(i);
-            offset -= tile.width() * tile.height();
-            target.setPixels(outlineBackground, offset, tile.width(), tile.left, tile.top, tile.width(), tile.height());
-            queueView(tile);
-        }
-        outlineTiles.clear();
-    }
+    private void eraseReferenceOutline() { outlineOverlay.hide(presented(), this::queueView); }
 
     // Direct e-ink presentation
 
@@ -753,6 +915,8 @@ final class DrawingPad extends View {
         if (navigationGesture(event)) return true;
         if (app.pickingShade || pickPointer != -1) { sampleShadeGesture(event); return true; }
         if (hasGradient()) return true;
+        if (moveGesture) { continueMove(event); return true; }
+        if (selectGesture) { continueSelectGesture(event); return true; }
         if (fillGesture) { continueFillGesture(event); return true; }
         if (shapeStroke != null) { continueShape(event); return true; }
         long inputStart = System.nanoTime();
@@ -814,6 +978,7 @@ final class DrawingPad extends View {
         int gray = fluid ? 0 : paint.gray, shade = erasing ? ToneDocument.ERASE : gray;
         if (settings.tool == ToolSettings.Tool.SHAPES) { beginShape(settings, shade); return true; }
         if (settings.tool == ToolSettings.Tool.FILL) { beginFill(settings, shade); return true; }
+        if (settings.tool == ToolSettings.Tool.SELECT) { beginSelection(settings); return true; }
         cancelWetCallback();
         // With opaque paint the wet brush pen keeps the selected ink: each stroke starts dipped in it again.
         if (settings.holdsInk() && !paint.transparentPaint && !erasing) paint.brushInk.load(gray);
@@ -885,6 +1050,11 @@ final class DrawingPad extends View {
             fillGesture = false; pointer = -1; clearGradientGuide(); endFastPreview();
             getParent().requestDisallowInterceptTouchEvent(false);
         }
+        if (selectGesture) {
+            removeCallbacks(previewFrame); previewFrameScheduled = false;
+            finishSelectionTrace();
+        }
+        if (moveGesture) cancelMove();
         cancelGradient();
         if (fill != null) {
             removeCallbacks(fillStep); fill.cancel(); fill = null;
@@ -943,6 +1113,8 @@ final class DrawingPad extends View {
         // Budget from frame start; rendering time must not add another full-frame delay.
         lastPreviewFrame = SystemClock.uptimeMillis();
         if (shapeStroke != null) renderShape(shapeStroke.preview(shapeX, shapeY, display, viewportBitmap != null));
+        else if (selectGesture) drawSelectionTrace();
+        else if (moveGesture) drawMoveGhost();
         else if (showsGradientGuide()) drawGradientGuide();
         else return;
         flush(true); previewFrameCount++;
@@ -998,6 +1170,16 @@ final class DrawingPad extends View {
         boolean changed = fill.finish();
         java.util.BitSet region = fill.region(); fill = null;
         app.toolbar.operationStatus.setText("");
+        if (selectingRegion) {
+            selectingRegion = false;
+            // A new selection replaces the old one; one that matched nothing clears it, so
+            // an empty selection never blocks the whole page.
+            Selection selection = Selection.of(region, document.width);
+            document.setSelection(selection.empty() ? null : selection);
+            refreshSelectionBorder();
+            if (selection.empty()) app.message("Nothing matched that area");
+            return;
+        }
         if (region != null) { wash(() -> WatercolorWash.pixels(wet, region, document.width, document.height, fillShade)); return; }
         renderDirty(); flush(true);
         if (changed) app.recovery();
@@ -1073,6 +1255,315 @@ final class DrawingPad extends View {
         app.saveToolState();
     }
 
+    // Selection
+
+    private void beginSelection(ToolSettings settings) {
+        if (clipboard != null || settings.selectMode == ToolSettings.SelectMode.MOVE) { beginMove(); return; }
+        if (settings.selectMode == ToolSettings.SelectMode.FILL) {
+            // A tap picks the connected tones around it, like the fill tool picks its region.
+            pickMode = ToolSettings.SelectMode.FILL;
+            selectingRegion = true;
+            fill = FloodFill.region(document, (int)samplePoint[0], (int)samplePoint[1], settings.tolerance);
+            app.toolbar.operationStatus.setText("Selecting\u2026");
+            post(fillStep);
+            return;
+        }
+        selectGesture = true;
+        pickMode = ToolSettings.SelectMode.FREEHAND;
+        tracePoints = 0;
+        addTracePoint(samplePoint[0], samplePoint[1]);
+        beginFastPreview();
+        drawSelectionTrace();
+    }
+
+    private void addTracePoint(float x, float y) {
+        if (tracePoints > 0) {
+            float dx = x - trace[(tracePoints-1)*2], dy = y - trace[(tracePoints-1)*2+1];
+            if (dx*dx + dy*dy < 4) return; // a resting pen adds nothing
+        }
+        if (tracePoints * 2 + 2 > trace.length) {
+            if (trace.length >= 1 << 17) return; // shortcut: 65k trace points cover any page's input rate
+            trace = java.util.Arrays.copyOf(trace, trace.length * 2);
+        }
+        trace[tracePoints*2] = x; trace[tracePoints*2+1] = y;
+        tracePoints++;
+    }
+
+    private void continueSelectGesture(MotionEvent event) {
+        int action = event.getActionMasked(), p = event.findPointerIndex(pointer);
+        if (action == MotionEvent.ACTION_CANCEL || p < 0) { finishStroke(); return; }
+        boolean up = pointerUp(event, pointer);
+        if (action == MotionEvent.ACTION_MOVE || up) {
+            pagePoint(event.getX(p), event.getY(p));
+            if (!up) { addTracePoint(samplePoint[0], samplePoint[1]); schedulePreviewFrame(); return; }
+            finishSelectionTrace();
+        }
+    }
+
+    /** The traced loop becomes the page's selection. */
+    private void finishSelectionTrace() {
+        selectGesture = false;
+        pointer = -1;
+        getParent().requestDisallowInterceptTouchEvent(false);
+        endFastPreview();
+        if (isTapTrace()) {
+            // A tap, or a pen that barely moved, traces no real loop. Rather than leave a
+            // speck of selection, treat it as the artist asking to let the selection go.
+            clearSelection();
+            return;
+        }
+        Selection lasso = Selection.lasso(trace, tracePoints, document.width, document.height);
+        document.setSelection(lasso);
+        refreshSelectionBorder();
+    }
+
+    /**
+     * Whether the trace is too small to be a lasso the artist meant: a tap, or the slight
+     * drag a deliberate tap always carries. Judged on how far the pen travelled rather than
+     * on points recorded, because the trace's deadzone still records several points for a
+     * few pixels of drift.
+     */
+    private boolean isTapTrace() {
+        if (tracePoints < 3) return true;
+        float left = trace[0], right = trace[0], top = trace[1], bottom = trace[1];
+        for (int i = 2; i + 1 < tracePoints * 2; i += 2) {
+            left = Math.min(left, trace[i]); right = Math.max(right, trace[i]);
+            top = Math.min(top, trace[i + 1]); bottom = Math.max(bottom, trace[i + 1]);
+        }
+        // A loop inside this is a tap. Comfortably past the few pixels a resting or
+        // hesitating pen drifts, and far short of any shape worth selecting.
+        float slop = dp(14);
+        return right - left < slop && bottom - top < slop;
+    }
+
+    /** Live preview of the lasso being traced: the traced line itself. */
+    private void drawSelectionTrace() {
+        float[] path = java.util.Arrays.copyOf(trace, tracePoints * 2);
+        if (viewportBitmap != null) pageToView.mapPoints(path);
+        showSelection(selectionBorder, new float[][]{path});
+    }
+
+    // Moving a copy
+
+    /** How far the copy has been dragged from where it was copied, in whole page pixels. */
+    private int moveDx, moveDy;
+    /**
+     * The undo depth just after a cut wiped its spot. If nothing else was recorded between
+     * then and the drop, the paste joins that wipe so one undo reverses the whole cut.
+     */
+    private int cutUndoDepth = -1;
+
+    /** The copy attached to the pen, where it is currently placed, or null. */
+    private Selection placedCopy() {
+        // The region, not just the painted pixels: the artist should be able to draw
+        // anywhere in the area they copied, not only where paint already happened to be.
+        return clipboard == null ? null : clipboard.selectionMovedBy(moveDx, moveDy, document.width, document.height);
+    }
+
+    private void beginMove() {
+        // Pen-down already claimed the pointer; a move that never starts must give it back.
+        if (document.selection() == null && clipboard == null) { releasePointer(); return; }
+        if (clipboard != null) {
+            // The first press after Cut or Copy centres the patch on the press. The pixels
+            // are written when the pen lifts, so placing and dragging it there are one
+            // gesture and one undo step.
+            if (!copyPlaced) {
+                moveDx = Math.round(samplePoint[0] - (clipboard.left + clipboard.width/2f));
+                moveDy = Math.round(samplePoint[1] - (clipboard.top + clipboard.height/2f));
+                copyPlaced = true;
+            }
+        } else if (!document.selection().contains((int)samplePoint[0], (int)samplePoint[1])) {
+            // A press outside the selection lets it go. Anything the copy left on the layer
+            // stays there: it was committed when the copy was placed.
+            clearSelection();
+            selectPickingMode(pickMode);
+            releasePointer();
+            return;
+        } else {
+            // A move of the page's own selection starts from zero each press. Without this
+            // the offsets of every earlier press pile up and each hop moves by the sum of
+            // all of them, which reads as moves registering late, short or wrong way.
+            moveDx = 0; moveDy = 0;
+        }
+        moveGesture = true;
+        moveBaseX = moveDx; moveBaseY = moveDy;
+        moveAnchorX = samplePoint[0]; moveAnchorY = samplePoint[1];
+        hideSelectionBorder();
+        beginFastPreview();
+        drawMoveGhost();
+        flush(true);
+    }
+
+    private void releasePointer() {
+        pointer = -1;
+        getParent().requestDisallowInterceptTouchEvent(false);
+    }
+
+    /**
+     * Lay the copy down where the pen left it and keep it selected, so the next press can
+     * keep nudging it or cut it off the page again. This is the moment a cut leaves its
+     * original spot. The document records what lay underneath as it writes, so cutting
+     * the placed copy uncovers that drawing rather than a hole the paste made. A cut's
+     * paste joins its own wipe so one undo reverses the whole cut.
+     */
+    private void writeCopy() {
+        // Read the cut's undo depth before clearing: it joins the wipe only if nothing else
+        // was recorded in between.
+        boolean joinsCut = cutUndoDepth >= 0 && cutUndoDepth == document.undoDepth();
+        Clipboard patch = clipboard;
+        int dx = moveDx, dy = moveDy;
+        clearClipboard();
+        try { document.pastePlaced(patch, dx, dy, joinsCut); }
+        catch (IllegalStateException error) { app.message(error.getMessage()); }
+        renderDirty();
+        drawSelectionBorder();
+        flush(true);
+        app.recovery();
+    }
+
+    private void continueMove(MotionEvent event) {
+        int action = event.getActionMasked(), p = event.findPointerIndex(pointer);
+        if (action == MotionEvent.ACTION_CANCEL || p < 0) { cancelMove(); return; }
+        boolean up = pointerUp(event, pointer);
+        if (action == MotionEvent.ACTION_MOVE || up) {
+            pagePoint(event.getX(p), event.getY(p));
+            if (up) { commitMove(); return; }
+            moveDx = moveBaseX + Math.round(samplePoint[0] - moveAnchorX);
+            moveDy = moveBaseY + Math.round(samplePoint[1] - moveAnchorY);
+            schedulePreviewFrame();
+        }
+    }
+
+    /** Draw the copy's outline at its current offset, replacing whatever the overlay showed. */
+    private float[][] ghostViewBase; /** The border mapped to view space once per gesture. */
+    private float[][] ghostAt; /** The reused frame buffer: the base shifted by the drag vector. */
+    private void drawMoveGhost() {
+        if (ghostViewBase == null) {
+            float[][] base = (clipboard != null ? clipboard.selectionMovedBy(0, 0, document.width, document.height)
+                    : document.selection()).border();
+            ghostViewBase = toView(base);
+            ghostAt = new float[ghostViewBase.length][];
+            for (int i = 0; i < ghostViewBase.length; i++) ghostAt[i] = ghostViewBase[i].clone();
+        }
+        // view = M*(page+d) = M*page + M*d, so the mapped base shifts by the rotated
+        // offset. With no viewport bitmap the overlay works in page space and the page
+        // rotation is applied later on the panel, so the offset must not be rotated here.
+        float[] v = { moveDx, moveDy };
+        if (viewportBitmap != null) pageToView.mapVectors(v);
+        for (int i = 0; i < ghostAt.length; i++) for (int j = 0; j < ghostAt[i].length; j += 2) {
+            ghostAt[i][j] = ghostViewBase[i][j] + v[0];
+            ghostAt[i][j+1] = ghostViewBase[i][j+1] + v[1];
+        }
+        showSelection(selectionBorder, ghostAt, clipboard != null ? this::paintCopy : null);
+    }
+
+    /**
+     * End the drag. A copy stays unwritten: the selection moves over it so the ghost keeps
+     * its place and the next press picks it up from there, or lets it go and commits it.
+     * Moving the page's own selection is the operation itself, so that one commits now.
+     */
+    private void commitMove() {
+        moveGesture = false;
+        releasePointer();
+        endFastPreview();
+        ghostViewBase = null; ghostAt = null;
+        // A copy riding the pen is written down now; a move of the page's own selection is
+        // the operation itself, so that one moves the pixels instead.
+        if (clipboard != null) { writeCopy(); return; }
+        try { document.moveSelection(moveDx, moveDy); }
+        catch (IllegalStateException error) { app.message(error.getMessage()); }
+        renderDirty();
+        drawSelectionBorder();
+        flush(true);
+        app.recovery();
+    }
+
+    private void cancelMove() {
+        moveGesture = false;
+        releasePointer();
+        ghostViewBase = null; ghostAt = null;
+        // An abandoned placement leaves the copy still on the pen, ready to be centred on
+        // the next tap rather than stuck where this one started.
+        if (clipboard != null) copyPlaced = false;
+        endFastPreview();
+        drawSelectionBorder();
+        flush(true);
+    }
+
+    /** Put the Selection tool back in a picking mode and tell the toolbar. */
+    private void selectPickingMode(ToolSettings.SelectMode mode) {
+        if (app.library.current().selectMode == mode) return;
+        app.library.edit(app.library.current().selectMode(mode));
+        app.saveToolState();
+        app.toolbar.refreshToolSelection();
+    }
+
+    /**
+     * Copy the selection out of the current layer; the tool moves to Move so the pen places
+     * it. The copy is not written to the layer until the artist deselects it.
+     */
+    void copySelection() {
+        // As with Cut: a copy already on the pen is not on the page, so reading the page
+        // would find nothing and lose the copy being carried.
+        if (clipboard != null) { stillCarrying(); return; }
+        try { clipboard = document.copySelection(); } catch (IllegalStateException error) { app.message(error.getMessage()); return; }
+        if (clipboard.empty()) { clipboard = null; return; }
+        carryCopy();
+    }
+
+    /**
+     * Copy the selection and take it off the page at once. The copy rides the pen like a
+     * copy does, so the artist taps where it should land and can keep moving it; the spot
+     * it came from is already bare. Undo puts the pixels back.
+     */
+    void cutSelection() {
+        // A copy already riding the pen is the thing to cut. None of it has been written to
+        // the page yet, so there is no spot to wipe, and re-reading the layer would find
+        // the selection bare and report "nothing is selected".
+        if (clipboard != null) { stillCarrying(); return; }
+        try {
+            clipboard = document.copySelection();
+            // Only join the wipe on the drop if the wipe actually recorded an edit;
+            // otherwise the paste would merge into an unrelated stroke instead.
+            if (document.wipeSelection()) cutUndoDepth = document.undoDepth();
+        } catch (IllegalStateException error) { clipboard = null; app.message(error.getMessage()); return; }
+        if (clipboard.empty()) { clipboard = null; return; }
+        carryCopy();
+        renderDirty();
+        app.recovery();
+    }
+
+    /** A fresh copy is on the pen at its own spot: select it and hand the pen to Move. */
+    private void carryCopy() {
+        moveDx = moveDy = 0;
+        document.setSelection(placedCopy());
+        selectPickingMode(ToolSettings.SelectMode.MOVE);
+        refreshSelectionBorder();
+    }
+
+    /** Cut and Copy both mean the copy in hand while one is still on the pen. */
+    private void stillCarrying() {
+        selectPickingMode(ToolSettings.SelectMode.MOVE);
+        app.message("Still carrying your copy. Drag it to move it, or tap outside to let it go.");
+    }
+
+    /** Forget the copy without writing it. */
+    void clearClipboard() {
+        clipboard = null; moveDx = moveDy = 0; copyPlaced = false;
+        cutUndoDepth = -1;
+        if (copyBitmap != null) { copyBitmap.recycle(); copyBitmap = null; copyBitmapSource = null; }
+    }
+    /** True until a held copy has had its first press place it on the canvas. */
+    private boolean copyPlaced;
+    boolean copyPending() { return clipboard != null; }
+
+    /** Clear the page's selection. */
+    void clearSelection() {
+        if (document.selection() == null) return;
+        document.setSelection(null);
+        refreshSelectionBorder();
+    }
+
     // Eyedropper
 
     private void sampleShadeGesture(MotionEvent event) {
@@ -1130,7 +1621,7 @@ final class DrawingPad extends View {
         boolean pen = false;
         for (int i = 0; i < event.getPointerCount(); i++)
             if (isPen(event, i)) pen = true;
-        if (pen || pointer != -1 || pickPointer != -1 || fillGesture || hasGradient()
+        if (pen || pointer != -1 || pickPointer != -1 || fillGesture || selectGesture || moveGesture || hasGradient()
                 || SystemClock.uptimeMillis() < penGuardUntil) {
             touchBlocked = true; endNavigation();
             if (pen) penGuardUntil = SystemClock.uptimeMillis()+250;

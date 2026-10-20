@@ -23,7 +23,7 @@ import java.util.Map;
 final class Toolbar {
     /** Tools offered in the toolbar, in their default order. */
     static final ToolSettings.Tool[] TOOLS = {ToolSettings.Tool.BRUSH, ToolSettings.Tool.BRUSH_PEN, ToolSettings.Tool.PENCIL,
-            ToolSettings.Tool.AIRBRUSH, ToolSettings.Tool.FILL, ToolSettings.Tool.SHAPES,
+            ToolSettings.Tool.AIRBRUSH, ToolSettings.Tool.FILL, ToolSettings.Tool.SHAPES, ToolSettings.Tool.SELECT,
             ToolSettings.Tool.ERASER, ToolSettings.Tool.SOFTEN};
     /** Toolbar entries that are not tools. */
     static final String LAYERS = "LAYERS", REFERENCE = "REFERENCE", ZOOM = "ZOOM", PALETTE = "PALETTE";

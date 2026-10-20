@@ -57,6 +57,9 @@ undo, and both Clear dropdown scopes in every rotation and drawing hand,
 eye-icon visibility toggles, brush/eraser isolation, and eight full-resolution layers with autosave. The suite
 uses a temporary book, restores the original session, and saves `layers-*.png`
 screenshots in the test app cache.
+Use `-e selectionOnly true` for the Selection tool: pen lasso, the copy ghost that
+rides the pen, dragging it, cut-on-drop, and clearing the selection, all driven by
+injected pen input so no stylus is needed.
 Use `-e storageOnly true` for focused Android storage checks in a disposable cache
 directory: nested folders, repeat saves, overwrite protection, Save As copies,
 failed saves, recovery destinations, and interrupted-save backup restoration.

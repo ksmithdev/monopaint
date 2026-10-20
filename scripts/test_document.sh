@@ -4,8 +4,8 @@ cd "$(dirname "$0")/.."
 test_classes=$(mktemp -d)
 trap 'rm -rf "$test_classes"' EXIT
 javac -d "$test_classes" \
-  app/src/main/java/io/github/mpdairy/monopaint/{GrayPalette,DotPattern,ToneDocument,ReferenceImage,DocumentCodec,DrawingBook,BookCodec,DrawingFiles,RecoveryCodec,ToolSettings,ToolLibrary,BrushDirection,BristleTexture,WetWatercolor,WetWorkBudget,FloodFill,ToneDabs,DrawingStroke,ToolStroke,ShapeStroke,ShapeGeometry,DirtyRegions,PaintLoad,BrushInk,WatercolorWash}.java \
-  app/src/test/java/io/github/mpdairy/monopaint/{LayerChecks,MaskChecks,DocumentChecks,ToolChecks,BookChecks,DrawingFilesChecks,BristleChecks,WetWatercolorChecks,FlatWashChecks,CanvasPaintChecks,GradientFillChecks,AirbrushChecks,EraseChecks,ShapeChecks,PaintLoadChecks,CanvasSizeChecks,ReferenceChecks,LegacyCompatibilityChecks}.java
+  app/src/main/java/io/github/mpdairy/monopaint/{GrayPalette,DotPattern,ToneDocument,ReferenceImage,DocumentCodec,DrawingBook,BookCodec,DrawingFiles,RecoveryCodec,ToolSettings,ToolLibrary,BrushDirection,BristleTexture,WetWatercolor,WetWorkBudget,FloodFill,ToneDabs,DrawingStroke,ToolStroke,ShapeStroke,ShapeGeometry,DirtyRegions,PaintLoad,BrushInk,WatercolorWash,Selection}.java \
+  app/src/test/java/io/github/mpdairy/monopaint/{LayerChecks,MaskChecks,DocumentChecks,ToolChecks,BookChecks,DrawingFilesChecks,BristleChecks,WetWatercolorChecks,FlatWashChecks,CanvasPaintChecks,GradientFillChecks,AirbrushChecks,EraseChecks,ShapeChecks,PaintLoadChecks,CanvasSizeChecks,ReferenceChecks,LegacyCompatibilityChecks,SelectionChecks}.java
 javac -d "$test_classes" app/src/main/java/io/github/mpdairy/monopaint/RotationSuggestion.java app/src/test/java/io/github/mpdairy/monopaint/RotationSuggestionChecks.java
 java -cp "$test_classes" io.github.mpdairy.monopaint.RotationSuggestionChecks
 java -cp "$test_classes" io.github.mpdairy.monopaint.DocumentChecks
@@ -31,6 +31,8 @@ javac -d "$test_classes" app/src/main/java/io/github/mpdairy/monopaint/CanvasVie
 java -cp "$test_classes" io.github.mpdairy.monopaint.ViewportChecks
 
 java -cp "$test_classes" io.github.mpdairy.monopaint.ShapeChecks
+
+java -cp "$test_classes" io.github.mpdairy.monopaint.SelectionChecks
 
 java -cp "$test_classes" io.github.mpdairy.monopaint.PaintLoadChecks
 

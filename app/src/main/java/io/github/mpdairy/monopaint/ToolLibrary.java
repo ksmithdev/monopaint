@@ -29,7 +29,21 @@ final class ToolLibrary {
     ToolSettings builtin(ToolSettings.Tool tool) { return builtins[tool.ordinal()]; }
     String activeId() { return activeId; }
     List<Preset> presets() { return Collections.unmodifiableList(presets); }
-    void select(ToolSettings.Tool tool) { current = builtins[tool.ordinal()]; activeId = ""; }
+    void select(ToolSettings.Tool tool) {
+        current = notMoving(builtins[tool.ordinal()]);
+        activeId = "";
+        builtins[tool.ordinal()] = current;
+    }
+    /**
+     * Move is a placement state, not a mode to come back to: it only means anything while
+     * a selection or a copy is in hand. Coming back to the Selection tool, on a fresh
+     * install or from saved settings, starts at the lasso instead of a mode that would
+     * leave presses on the canvas doing nothing.
+     */
+    private static ToolSettings notMoving(ToolSettings settings) {
+        return settings.tool == ToolSettings.Tool.SELECT && settings.selectMode == ToolSettings.SelectMode.MOVE
+                ? settings.selectMode(ToolSettings.SelectMode.FREEHAND) : settings;
+    }
     void edit(ToolSettings settings) {
         settings = settings.automaticHead();
         if (settings.tool != current.tool) activeId = "";
@@ -95,7 +109,7 @@ final class ToolLibrary {
         return trimmed;
     }
     /** Current preset format. When appending a tool, bump this and extend {@link #toolCount}; when appending a field, bump this and read it from the new version. */
-    private static final int FORMAT = 0x54535049;
+    private static final int FORMAT = 0x5453504a;
     byte[] encode() throws IOException {
         ByteArrayOutputStream bytes = new ByteArrayOutputStream(); DataOutputStream out = new DataOutputStream(bytes);
         out.writeInt(FORMAT);
@@ -116,7 +130,7 @@ final class ToolLibrary {
             int builtinCount = toolCount(version);
             for (int index = 0; index < builtinCount; index++) {
                 ToolSettings.Tool tool = ToolSettings.Tool.values()[index];
-                ToolSettings settings = read(in, version);
+                ToolSettings settings = notMoving(read(in, version));
                 if (settings.tool != tool) throw new IOException("Invalid built-in settings");
                 library.remember(settings);
             }
@@ -129,16 +143,17 @@ final class ToolLibrary {
                 if (!builtin.equals(library.heads[builtin.tool.ordinal()][builtin.head.ordinal()]))
                     throw new IOException("Inconsistent brush head settings");
             }
-            library.current = read(in, version); String active = in.readUTF(); int count = in.readInt();
+            ToolSettings saved = read(in, version); String active = in.readUTF(); int count = in.readInt();
             if (count < 0 || count > 100) throw new IOException("Invalid preset count");
             java.util.HashSet<String> ids = new java.util.HashSet<>();
             for (int i = 0; i < count; i++) {
                 String id = in.readUTF(), name = validName(in.readUTF());
                 if (id.length() != 36 || !ids.add(id)) throw new IOException("Invalid preset ID");
-                library.presets.add(new Preset(id, name, read(in, version)));
+                library.presets.add(new Preset(id, name, notMoving(read(in, version))));
             }
-            if (!active.isEmpty() && !library.find(active).settings.equals(library.current))
+            if (!active.isEmpty() && !library.find(active).settings.equals(notMoving(saved)))
                 throw new IOException("Invalid active preset");
+            library.current = notMoving(saved);
             library.activeId = active;
             if (in.read() != -1) throw new IOException("Extra preset data");
             return library;
@@ -146,7 +161,7 @@ final class ToolLibrary {
     }
     /** Tools are appended over time; each format version knows how many it stores. */
     private static int toolCount(int version) {
-        return version >= 0x54535043 ? 12 : version >= 0x54535042 ? 11 : version >= 0x54535040 ? 10 : version >= 0x5453503f ? 9 : version >= 0x5453503b ? 8
+        return version >= 0x5453504a ? 13 : version >= 0x54535043 ? 12 : version >= 0x54535042 ? 11 : version >= 0x54535040 ? 10 : version >= 0x5453503f ? 9 : version >= 0x5453503b ? 8
                 : version >= 0x5453503a ? 7 : version >= 0x54535037 ? 6 : 5;
     }
     private static void write(DataOutputStream out, ToolSettings settings) throws IOException {
@@ -161,6 +176,7 @@ final class ToolLibrary {
         // now keeps its clear water choice here, so older presets read it as holding ink.
         out.writeBoolean(settings.clearWater);
         out.writeInt(settings.coverage);
+        out.writeByte(settings.selectMode.ordinal());
     }
     private static ToolSettings read(DataInputStream in, int version) throws IOException {
         int tool = in.readUnsignedByte();
@@ -190,13 +206,15 @@ final class ToolLibrary {
         int minimumLoad=version>=0x54535047?in.readInt():ToolSettings.DEFAULT_MINIMUM_LOAD;
         boolean clearWater = version >= 0x54535048 && in.readBoolean() && tool == ToolSettings.Tool.WET_BRUSH_PEN.ordinal();
         int coverage = version >= 0x54535049 ? in.readInt() : ToolSettings.DEFAULT_COVERAGE;
+        int selectMode = version >= 0x5453504a ? in.readUnsignedByte() : 0;
         if(shape>=ToolSettings.Shape.values().length) throw new IOException("Unknown shape");
         if(gradient>=ToolSettings.Gradient.values().length) throw new IOException("Unknown gradient type");
         if (head >= ToolSettings.Head.values().length) throw new IOException("Unknown brush head");
+        if (selectMode >= ToolSettings.SelectMode.values().length) throw new IOException("Unknown selection mode");
         // Earlier builds ignored Flat's stored thickness and always drew 1px.
         // Preserve that appearance until the user changes the new height slider.
         if (version < 0x5453503d && head == ToolSettings.Head.FLAT.ordinal()) headThickness=0;
-        return new ToolSettings(ToolSettings.Tool.values()[tool], minimum, maximum, tip, softness, tilt, hardness, tolerance, strength, pressureResponse, ToolSettings.Head.values()[head], angle, bristles, headThickness, ToolSettings.Gradient.values()[gradient], ToolSettings.Shape.values()[shape], filled, outlineWidth, carry, paintLoad, loadingSpeed, minimumLoad).clearWater(clearWater).coverage(coverage).automaticHead();
+        return new ToolSettings(ToolSettings.Tool.values()[tool], minimum, maximum, tip, softness, tilt, hardness, tolerance, strength, pressureResponse, ToolSettings.Head.values()[head], angle, bristles, headThickness, ToolSettings.Gradient.values()[gradient], ToolSettings.Shape.values()[shape], filled, outlineWidth, carry, paintLoad, loadingSpeed, minimumLoad).clearWater(clearWater).coverage(coverage).selectMode(ToolSettings.SelectMode.values()[selectMode]).automaticHead();
     }
     static final class Preset {
         final String id, name; final ToolSettings settings;

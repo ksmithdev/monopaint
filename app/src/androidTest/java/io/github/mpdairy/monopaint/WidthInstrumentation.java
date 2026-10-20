@@ -31,6 +31,7 @@ public final class WidthInstrumentation extends Instrumentation {
     private boolean storageOnly;
     private boolean orientationOnly, layersOnly, toolbarOnly, gradientOnly, airbrushOnly, eraseOnly, zoomOnly;
     private boolean referenceOnly;
+    private boolean selectionOnly;
     private NativePen pen;
     private volatile CountDownLatch complete;
     private volatile double measured;
@@ -76,6 +77,7 @@ public final class WidthInstrumentation extends Instrumentation {
         gradientOnly = args != null && "true".equals(args.getString("gradientOnly"));
         orientationOnly = args != null && "true".equals(args.getString("orientationOnly"));
         referenceOnly = args != null && "true".equals(args.getString("referenceOnly"));
+        selectionOnly = args != null && "true".equals(args.getString("selectionOnly"));
         paletteOnly = args != null && "true".equals(args.getString("paletteOnly"));
         palettePerfOnly = args != null && "true".equals(args.getString("palettePerfOnly"));
         start();
@@ -96,11 +98,12 @@ public final class WidthInstrumentation extends Instrumentation {
         Bundle result = new Bundle();
         StringBuilder report = new StringBuilder();
         allowSharedStorage();
-        if (edgeBarsOnly || fullscreenOnly || colorBarOnly || settingsOnly || pagesOnly || nomadOnly || pickerOnly || shapesPerfOnly || shapesOnly || palettePerfOnly || paletteOnly || paintOnly || brushOnly || brushPerfOnly || storageOnly || orientationOnly || layersOnly || toolbarOnly || gradientOnly || airbrushOnly || eraseOnly || zoomOnly || referenceOnly) {
+        if (edgeBarsOnly || fullscreenOnly || colorBarOnly || settingsOnly || pagesOnly || nomadOnly || pickerOnly || shapesPerfOnly || shapesOnly || palettePerfOnly || paletteOnly || paintOnly || brushOnly || brushPerfOnly || storageOnly || orientationOnly || layersOnly || toolbarOnly || gradientOnly || airbrushOnly || eraseOnly || zoomOnly || referenceOnly || selectionOnly) {
             try {
                 if (edgeBarsOnly) EdgeBarChecks.run(this,report);
                 else if (fullscreenOnly) FullscreenChecks.run(this,report);
                 else if (referenceOnly) ReferenceUiChecks.run(this,report);
+                else if (selectionOnly) SelectionUiChecks.run(this,report);
                 else if (colorBarOnly) ColorBarChecks.run(this,report,pageFeedbackOnly);
                 else if (settingsOnly) ShapeUiChecks.run(this,report,false,false,false,false,true);
                 else if (pagesOnly) ShapeUiChecks.run(this,report,false,false,false,true);

@@ -801,7 +801,7 @@ public final class PaintActivity extends Activity implements ControlHost {
         int width=pad.document.width, height=pad.document.height;
         if (step.apply()) {
             if(width!=pad.document.width || height!=pad.document.height) { pad.viewport.reset(); pad.canvasResized(); }
-            else { pad.renderDirty(); pad.present(); }
+            else { pad.renderDirty(); pad.refreshSelectionBorder(); pad.present(); }
             recovery();
         }
     }

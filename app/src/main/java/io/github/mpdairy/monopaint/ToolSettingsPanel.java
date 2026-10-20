@@ -26,6 +26,7 @@ final class ToolSettingsPanel extends SidePanel {
         return app.library.current().tool == ToolSettings.Tool.SHAPES ? (large ? 560 : 520) : (large ? 448 : 400);
     }
     private ToolLibrary library() { return app.library; }
+
     /** Shapes start with only the shape choices until one is picked. */
     private boolean shapeChosen() { return !presetId.isEmpty() || app.toolbar.shapeChosen(); }
 
@@ -40,8 +41,12 @@ final class ToolSettingsPanel extends SidePanel {
                     library().edit(library().current().shape(shape));
                     if (presetId.isEmpty()) app.prefs.setShapeChosen();
                     variantChosen();
-                });
+                },
+                mode -> { library().edit(library().current().selectMode(mode)); variantChosen(); });
         if (variants != null) panel.addView(variants);
+        boolean selecting = tool == ToolSettings.Tool.SELECT;
+        // The selection's Cut/Copy/Move/Clear/Done row goes straight under the mode choices.
+        if (selecting) panel.addView(selectionActions(), actionsRow());
         SettingsForm form = null;
         if (tool != ToolSettings.Tool.SHAPES || shapeChosen()) {
             form = new SettingsForm(app, app.prefs.largeSettingsText(), new SettingsForm.Editor() {
@@ -55,16 +60,23 @@ final class ToolSettingsPanel extends SidePanel {
         }
         boolean controls = form != null && form.content.getChildCount() > 0;
         // Unchosen Shapes keeps its rule above the actions.
-        if (variants != null && (controls || tool == ToolSettings.Tool.SHAPES)) {
+        if (!selecting && variants != null && (controls || tool == ToolSettings.Tool.SHAPES)) {
             View divider = new View(app); divider.setBackgroundColor(0xffcccccc);
             LinearLayout.LayoutParams line = new LinearLayout.LayoutParams(-1, app.dp(1));
             line.setMargins(app.dp(2), app.dp(12), app.dp(2), 0); panel.addView(divider, line);
         }
         if (controls) panel.addView(form.content);
-        panel.addView(actions());
+        if (!selecting) panel.addView(actions());
         SettingsForm.style(panel, app.prefs.largeSettingsText());
         if (popup.isShowing()) position();
     }
+
+    private LinearLayout.LayoutParams actionsRow() {
+        LinearLayout.LayoutParams row = new LinearLayout.LayoutParams(-1, -2);
+        row.setMargins(app.dp(2), app.dp(10), app.dp(2), 0);
+        return row;
+    }
+
     private LinearLayout actions() {
         LinearLayout actions = new LinearLayout(app); actions.setGravity(Gravity.END);
         Button save = new Button(app); save.setAllCaps(false); save.setBackgroundColor(Color.WHITE);
@@ -83,6 +95,58 @@ final class ToolSettingsPanel extends SidePanel {
         String close = tool == ToolSettings.Tool.SHAPES ? "Close shapes" : brush ? "Close brush" : "Close tool settings";
         actions.addView(closeButton(close), new LinearLayout.LayoutParams(app.dp(48), app.dp(48)));
         return actions;
+    }
+    /**
+     * Cut, Copy, Move and Clear for the Selection tool, in a small row under the mode
+     * choices. Cut and Copy close the panel so the canvas is free: the next thing the
+     * artist does with the pen is place the copy where they want it.
+     */
+    private LinearLayout selectionActions() {
+        LinearLayout actions = new LinearLayout(app); actions.setGravity(Gravity.END);
+        boolean hasSelection = app.pad.document.selection() != null;
+        boolean carrying = app.pad.copyPending();
+        addButton(actions, "Cut", hasSelection, "Cut the selection and attach it to the pen", v -> {
+            app.pad.cutSelection();
+            if (app.pad.copyPending()) {
+                popup.dismiss();
+                app.message("Cut. Tap the canvas with the Selection tool to place the copy.");
+            }
+        });
+        addButton(actions, "Copy", hasSelection, "Copy the selection and attach it to the pen", v -> {
+            app.pad.copySelection();
+            if (app.pad.copyPending()) {
+                popup.dismiss();
+                app.message("Copied. Tap the canvas with the Selection tool to place the copy.");
+            }
+        });
+        addButton(actions, "Move", hasSelection || carrying,
+                "Move the selection, or the copy attached to the pen, by dragging on the canvas", v -> {
+            library().edit(library().current().selectMode(ToolSettings.SelectMode.MOVE));
+            app.saveToolState(); app.toolbar.refreshToolSelection();
+            popup.dismiss();
+            app.message("Drag on the canvas to move it. Tap outside to let go.");
+        });
+        addButton(actions, "Clear", hasSelection, "Clear the selection",
+                v -> { app.pad.clearSelection(); popup.dismiss(); });
+        addButton(actions, "Done", true, "Close the selection panel", v -> popup.dismiss());
+        return actions;
+    }
+    /** One flat action button in the selection row, with a shared width and style. */
+    private void addButton(LinearLayout row, String label, boolean enabled, String description,
+                          android.view.View.OnClickListener onClick) {
+        ToolButton button = actionButton(label);
+        button.setEnabled(enabled);
+        button.setContentDescription(description != null ? description : label);
+        button.setOnClickListener(onClick);
+        row.addView(button, new LinearLayout.LayoutParams(0, app.dp(48), 1));
+    }
+    private ToolButton actionButton(String label) {
+        ToolButton button = new ToolButton(app, app);
+        button.press.feedback = app.layerFeedback;
+        button.setTextSize(14); button.setPadding(app.dp(4), 0, app.dp(4), 0);
+        button.setAllCaps(false);
+        button.setText(label);
+        return button;
     }
     private void variantChosen() {
         app.saveToolState(); app.toolbar.refreshToolSelection(); render();
