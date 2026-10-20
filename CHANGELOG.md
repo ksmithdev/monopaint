@@ -7,41 +7,23 @@ with each change; when cutting a release, turn that section into
 ## Unreleased
 
 - A new **Selection** button in the toolbar lets you fence off part of the page so
-  your pen only changes what's inside. Pick **Freehand** and trace a loop around an
-  area: everything you enclose becomes the selection. Pick **Fill** and tap: the
-  matching tones around your tap become the selection, wider or narrower with the
-  tolerance. Any new selection replaces the previous one, and a tap that encloses
-  or matches nothing clears it. While a selection is on, every tool —
-  brushes, pencil, eraser, fill — only paints inside it, and it stays put when you
-  switch layers, so you can colour one shape across several layers at once. The panel's
-  buttons work on whatever is selected. **Cut** blanks the selection off the page at
-  once and **Copy** keeps a duplicate; either way the pixels follow your pen as a
-  ghost, and the tap that places them writes them onto the layer you're working on.
-  Keep dragging before you lift to move them as you place them. Once placed they stay
-  selected, so you can keep nudging them around, draw inside them, **Cut** them off the
-  page again and place them somewhere else with another tap, or **Copy** them to make a
-  second copy while the first stays put. Tapping outside the selection commits what's on
-  the layer and lets the selection go, falling back to the picking mode you last used,
-  Freehand or Fill. A cut's spot is already bare while you carry it, and the whole cut
-  is a single undoable step, so one tap of undo puts everything back. Copies carry only
-  the pixels that hold paint, so a copy never lays a box of white over what's
-  underneath. Undo walks the selection back to where the move started, so the dashed
-  border follows the pixels in both directions. Painting inside a
-  selection is much faster, and stays fast however large the selection is: a stroke
-  now redraws only the bit of the selection edge it crosses, instead of the whole
-  outline every time. A big selection used to make every stroke noticeably heavier.
-  Long drags keep the copy glued to your pen: it used to fall further and further
-  behind the further you dragged.
-  **Clear** frees the whole page again and **Done** closes the panel. In Freehand
-  mode a plain tap now clears the selection, and so does a tap that drifts a few
-  pixels — you don't have to hit the Clear button to get rid of a speck you made by
-  accident. The selection
-  is working state: it isn't saved with your drawing, and undo doesn't move it.
-  Moving a copy a second time no longer damages your drawing: a placed copy carries
-  only its own pixels, so nudging it across a drawing can't drag that drawing along,
-  and moving it off again brings back the artwork it was covering instead of leaving
-  a blank hole shaped like the copy. Cutting a copy you've already placed uncovers
-  the drawing too.
+  your pen only changes what's inside. In **Freehand** mode, trace a loop around
+  an area; in **Fill** mode, tap and the matching tones around your tap become the
+  selection, wider or narrower with the tolerance. While a selection is on, every
+  tool only paints inside it, and it stays put when you switch layers, so you can
+  colour one shape across several layers at once. The panel's buttons work on
+  whatever is selected: **Cut** blanks it off the page and **Copy** keeps a
+  duplicate — either way the pixels ride your pen as a ghost until you tap to
+  place them, and you can keep nudging, redrawing, re-cutting or re-copying them
+  from there. Tapping outside commits the pixels and lets the selection go;
+  **Clear** frees the whole page, and in Freehand mode a plain tap does too. A
+  copy carries only the pixels that hold paint and only its own artwork, so it
+  never lays white over your drawing or drags it along — and moving it off again
+  uncovers what it was covering. Cuts, moves and pastes are each a single undoable
+  step that takes the selection back with it. Painting inside a selection stays
+  fast however large it is, and long drags keep the copy glued to your pen. Every
+  tap hands over cleanly, so you can select, clear and select again as many times
+  as you like. The selection is working state: it isn't saved with your drawing.
 
 - A new **Reference** button in the toolbar (under Layers) lays a picture from your
   tablet **under every layer** for tracing or copying. Import it from the panel,

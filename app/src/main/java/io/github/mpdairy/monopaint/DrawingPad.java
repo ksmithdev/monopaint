@@ -1057,7 +1057,7 @@ final class DrawingPad extends View {
         if (moveGesture) cancelMove();
         cancelGradient();
         if (fill != null) {
-            removeCallbacks(fillStep); fill.cancel(); fill = null;
+            removeCallbacks(fillStep); fill.cancel(); fill = null; selectingRegion = false; pointer = -1;
             renderDirty(); flush(true); app.toolbar.operationStatus.setText("");
         }
         if (stroke == null) return;
@@ -1169,6 +1169,11 @@ final class DrawingPad extends View {
         if (!advanceFor5ms(fill)) { postDelayed(fillStep, 1); return; }
         boolean changed = fill.finish();
         java.util.BitSet region = fill.region(); fill = null;
+        // A Fill-mode selection claims the pointer at pen-down, and every event until the
+        // fill ends is swallowed above, so nothing else ever gives the pointer back. Left
+        // claimed, the next pen-down fails the "no pointer in hand" gate and no tool starts.
+        pointer = -1;
+        getParent().requestDisallowInterceptTouchEvent(false);
         app.toolbar.operationStatus.setText("");
         if (selectingRegion) {
             selectingRegion = false;

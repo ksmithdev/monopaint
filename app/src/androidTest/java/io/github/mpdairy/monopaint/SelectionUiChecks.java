@@ -779,6 +779,41 @@ final class SelectionUiChecks {
             });
             report.append("PASS: a tap (even with a slight drag) clears the selection.\n");
 
+            // 25. Fill selection twice in a row. The region fill starts at pen-down and its
+            // result arrives only after the pen has lifted, so the gesture must hand the
+            // pointer back when the fill lands. If it does not, the next pen-down finds a
+            // pointer still claimed and no tool starts at all: the artist can never select,
+            // fill or paint again until the app restarts.
+            main(test, () -> {
+                ToneDocument page = (ToneDocument) get(pad, "document");
+                page.setSelection(null);
+                call(pad, "clearClipboard");
+                library.select(ToolSettings.Tool.SELECT);
+                library.edit(library.current().selectMode(ToolSettings.SelectMode.FILL).tolerance(0));
+                call(get(activity, "toolbar"), "refreshToolSelection");
+            });
+            test.waitForIdleSync(); SystemClock.sleep(150);
+            fillSelect(test, pad, 40, 40, "first fill selection");
+            main(test, () -> call(pad, "clearSelection"));
+            test.waitForIdleSync(); SystemClock.sleep(80);
+            fillSelect(test, pad, 40, 40, "fill selection straight after a clear");
+            // The Fill tool shares the same posted fill; it must release the pointer too.
+            main(test, () -> {
+                library.select(ToolSettings.Tool.FILL);
+                call(get(activity, "toolbar"), "refreshToolSelection");
+            });
+            test.waitForIdleSync(); SystemClock.sleep(80);
+            long paintDown = SystemClock.uptimeMillis();
+            pen(test, pad, MotionEvent.ACTION_DOWN, paintDown, 60, 40);
+            pen(test, pad, MotionEvent.ACTION_UP, paintDown, 60, 40);
+            for (int i = 0; i < 100 && get(pad, "fill") != null; i++) SystemClock.sleep(20);
+            test.waitForIdleSync(); SystemClock.sleep(80);
+            main(test, () -> {
+                check(get(pad, "fill") == null, "The paint fill finished");
+                check((Integer) get(pad, "pointer") == -1, "The paint fill gives the pointer back");
+            });
+            report.append("PASS: fill selection and fill work again right after being cleared.\n");
+
         } finally {
             main(test, () -> {
                 call(pad, "finishStroke"); call(pad, "dryWet");
@@ -940,6 +975,24 @@ final class SelectionUiChecks {
         float[] a = new float[f.size()];
         for (int i = 0; i < a.length; i++) a[i] = f.get(i);
         return a;
+    }
+
+    /** Tap in Fill selection mode and wait for the region fill to land. */
+    private static void fillSelect(Instrumentation test, Object pad, float pageX, float pageY,
+                                  String label) throws Exception {
+        long down = SystemClock.uptimeMillis();
+        pen(test, pad, MotionEvent.ACTION_DOWN, down, pageX, pageY);
+        pen(test, pad, MotionEvent.ACTION_UP, down, pageX, pageY);
+        for (int i = 0; i < 100 && get(pad, "fill") != null; i++) SystemClock.sleep(20);
+        test.waitForIdleSync(); SystemClock.sleep(80);
+        main(test, () -> {
+            ToneDocument page = (ToneDocument) get(pad, "document");
+            Selection sel = page.selection();
+            check(sel != null && sel.contains((int) pageX, (int) pageY),
+                    label + ": the tapped area is selected, got " + selStr(page));
+            check((Integer) get(pad, "pointer") == -1,
+                    label + ": the gesture released the pointer, so the next tap can start");
+        });
     }
 
     private static void trace(Instrumentation test, Object pad, float[][] points) throws Exception {
